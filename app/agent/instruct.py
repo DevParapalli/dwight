@@ -3,6 +3,7 @@ from app.agent.policy import load_policy
 from app.llm.client import LLMNotConfigured, complete_json
 from app.llm.prompts import build_bulk_instruction_prompt
 from app.schema.loader import Schema
+from app.settings import settings
 
 
 def interpret_bulk_instruction(instruction: str, field_name: str, record_count: int,
@@ -36,7 +37,9 @@ def interpret_bulk_instruction(instruction: str, field_name: str, record_count: 
         field_name, field, record_count, instruction.strip(), current_values
     )
     try:
-        result, _ = complete_json(system_prompt, user_prompt, max_tokens=600)
+        # Same reasoning-model ceiling as the duplicate judge.
+        result, _ = complete_json(system_prompt, user_prompt,
+                                  max_tokens=settings.llm_max_output_tokens)
     except LLMNotConfigured:
         return None, "no model is configured, so instructions cannot be read"
 

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ employee_id }} · target system{% endblock %}
+{% block subtitle %}employee {{ employee_id }}{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>TARGET</b> · EMPLOYEE RECORD )</div>
+    <h1>{{ name or employee_id }}</h1>
+    <div class="when">{{ fields | length }} field{{ '' if fields | length == 1 else 's' }} stored · written {{ updated_at }}</div>
+  </div>
+  <div class="actions">
+    <a class="btn btn-ghost btn-sm" href="/v1/employees/{{ employee_id }}">JSON</a>
+    <a class="btn btn-glass btn-sm" href="/">All employees</a>
+  </div>
+</div>
+
+<div class="mosaic">
+  <div class="kpi m-4">
+    <div class="k-label">( EMPLOYEE ID )</div>
+    <div class="k-val mono" style="font-size:22px">{{ employee_id }}</div>
+    <div class="k-foot"><span>primary key in this system</span></div>
+  </div>
+  <div class="kpi m-4">
+    <div class="k-label">( ARRIVED ON RUN )</div>
+    <div class="k-val mono" style="font-size:16px">{{ run_id or "—" }}</div>
+    <div class="k-foot"><span>the migration run that sent it</span></div>
+  </div>
+  <div class="kpi m-4">
+    <div class="k-label">( FIRST WRITTEN )</div>
+    <div class="k-val mono" style="font-size:16px">{{ created_at }}</div>
+    <div class="k-foot"><span>last written {{ updated_at }}</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <header>
+    <h3>Every field, as stored</h3>
+    <p>In the order the record arrived in. A blank means the field was sent empty, not that it is missing.</p>
+  </header>
+  <div class="dtable">
+    <table class="kv">
+      <tbody>
+        {% for f in fields %}
+        <tr>
+          <td>{{ f.name }}</td>
+          {% if f.value %}<td>{{ f.value }}</td>{% else %}<td class="empty">empty</td>{% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card u-mt-2">
+  <header><h3>Raw payload</h3><p>Byte for byte what this system kept.</p></header>
+  <pre class="raw">{{ raw }}</pre>
+</div>
+
+{% endblock %}

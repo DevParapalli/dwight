@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Employees · target system{% endblock %}
+{% block subtitle %}{{ "{:,}".format(total) }} employee record{{ '' if total == 1 else 's' }} held{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>TARGET</b> · EMPLOYEE MASTER )</div>
+    <h1>What this system <em class="serif-em">holds.</em></h1>
+    <div class="when">
+      {% if q %}{{ "{:,}".format(matching) }} of {{ "{:,}".format(total) }} match “{{ q }}”
+      {% else %}every record accepted through the employee API{% endif %}
+    </div>
+  </div>
+  <div class="actions">
+    <form class="u-flex" method="get" action="/" role="search">
+      <label class="input">
+        {# The placeholder is not a label; the visible text below it is, and
+           display:none would take it from a screen reader too. #}
+        <input type="search" name="q" value="{{ q }}" aria-label="Search employees"
+               placeholder="employee id, name, email…">
+      </label>
+      <button class="btn btn-primary btn-sm" type="submit">Search</button>
+      {% if q %}<a class="btn btn-ghost btn-sm" href="/">Clear</a>{% endif %}
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <header>
+    <h3>Employees</h3>
+    <p>Stored by the target itself, most recently written first. Open one to see every field it kept.</p>
+  </header>
+  <div class="dtable">
+    <table>
+      <thead>
+        <tr>
+          <th>Employee ID</th><th>Name</th><th>Work email</th>
+          <th>Department</th><th>Arrived on run</th><th>Last written</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in employees %}
+        <tr>
+          <td class="mono"><a href="/employees/{{ e.employee_id }}">{{ e.employee_id }}</a></td>
+          <td>{{ e.name }}</td>
+          <td>{{ e.work_email }}</td>
+          <td>{{ e.department }}</td>
+          <td class="mono">{{ e.run_id }}</td>
+          <td class="mono">{{ e.updated_at }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">
+          {% if q %}No employee here matches “{{ q }}”.
+          {% else %}This system holds no employees yet. Push a run from the agent and they appear here.{% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pager">
+    {% if offset %}
+    <a class="btn btn-glass btn-sm" href="/?q={{ q | urlencode }}&offset={{ prev_offset }}">Previous</a>
+    {% endif %}
+    {% if has_next %}
+    <a class="btn btn-glass btn-sm" href="/?q={{ q | urlencode }}&offset={{ next_offset }}">Next</a>
+    {% endif %}
+    <span class="count">
+      {% if matching %}showing {{ offset + 1 }}–{{ offset + employees | length }} of {{ "{:,}".format(matching) }}{% endif %}
+    </span>
+  </div>
+</div>
+
+{% endblock %}

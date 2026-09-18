@@ -11,10 +11,12 @@ from app.agent.policy import (
     dupe_scope_key,
     signature,
 )
+from app.agent.validate import rule_issues
 from app.audit import record_change, utcnow
 from app.db import connect, new_id
 from app.progress import Ticker, emit
 from app.schema.loader import Schema
+from app.schema.pydantic_builder import build_model
 
 
 class _UnionFind:
@@ -133,6 +135,63 @@ def _survivorship(cluster: list[dict], schema: Schema, policy: dict,
         survivorship[field_name] = entry
 
     return merged, survivorship, issues
+
+
+def _requestion_survivor(conn, run_id: str, survivor_id: str, merged_data: dict,
+                         schema: Schema, policy: dict, model) -> None:
+    """Brings a survivor's open questions back in line with its merged data.
+
+    Survivorship is the last thing that writes a record, and it can assemble a
+    contradiction that no single source had -- a hire date taken from one file
+    landing after a termination date taken from another, with neither file wrong
+    on its own. It can equally settle one, when the field a record was missing
+    arrives from a sibling. clean_and_validate ran before this and will not run
+    again, so without this pass the merged record is the only version of a
+    person that nothing ever judged.
+
+    Both directions, because either one on its own leaves the queue counting a
+    population the records no longer describe.
+    """
+    failing = {}
+    for issue in rule_issues(merged_data, schema, policy, model=model):
+        failing[(issue.decision.context or {}).get("rule_id")] = issue
+
+    asked = {
+        row["rule_id"]: row["id"]
+        for row in conn.execute(
+            """SELECT id, json_extract(context, '$.rule_id') AS rule_id FROM escalations
+               WHERE entity_id = ? AND status = 'open' AND reason_code = 'LOGIC_CONTRADICTION'""",
+            (survivor_id,),
+        )
+    }
+
+    for rule_id in asked.keys() - failing.keys():
+        conn.execute(
+            "UPDATE escalations SET status = 'superseded', resolved_at = ? WHERE id = ?",
+            (utcnow(), asked[rule_id]),
+        )
+        record_change(
+            conn, run_id=run_id, actor="agent", stage="reconciled",
+            reason_code="LOGIC_CONTRADICTION", entity_type="record", entity_id=survivor_id,
+            rule_id=rule_id,
+            note="question superseded: the merge supplied what the record was missing",
+        )
+
+    for rule_id in failing.keys() - asked.keys():
+        issue = failing[rule_id]
+        create_or_merge_escalation(conn, run_id, issue.decision, entity_id=survivor_id)
+        # Matches what a contradiction found at validation time leaves behind,
+        # so a merge-made one is not a second class of record downstream.
+        conn.execute(
+            "UPDATE records SET blocked_on = ?, updated_at = ? WHERE id = ? AND blocked_on IS NULL",
+            (issue.decision.reason_code, utcnow(), survivor_id),
+        )
+        record_change(
+            conn, run_id=run_id, actor="agent", stage="reconciled",
+            reason_code=issue.decision.reason_code, entity_type="record",
+            entity_id=survivor_id, field=issue.field, rule_id=rule_id,
+            note=f"escalated after merge: {issue.decision.scope_key}",
+        )
 
 
 def _judge_band_pairs(run_id: str, records: dict, band_pairs: list[tuple], policy: dict) -> dict:
@@ -316,6 +375,9 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
     # One connection for every cluster's writes, not one per cluster -- with
     # thousands of clusters, per-cluster connections make SQLite's WAL commit
     # overhead the dominant cost (this was ~59s of a ~60s run before batching).
+    # Built once: the rule pass runs per cluster and build_model is not cached,
+    # and this loop is already the run's slowest write.
+    rule_model = build_model(schema, require_all=False)
     with connect() as conn:
         for member_ids in clusters.values():
             if len(member_ids) < 2:
@@ -338,6 +400,22 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
                     "UPDATE records SET status = 'merged', updated_at = ? WHERE id = ?",
                     (utcnow(), member["id"]),
                 )
+                # A question raised against a row that has just been absorbed is
+                # now about nobody: the survivor is the only version of this
+                # person that reaches the target, and it answers for itself just
+                # below. Not 'resolved' -- nobody decided anything, and the
+                # resolved count is a measure of human work.
+                superseded = conn.execute(
+                    "UPDATE escalations SET status = 'superseded', resolved_at = ? "
+                    "WHERE entity_id = ? AND status = 'open'",
+                    (utcnow(), member["id"]),
+                ).rowcount
+                if superseded:
+                    record_change(
+                        conn, run_id=run_id, actor="agent", stage="reconciled",
+                        entity_type="record", entity_id=member["id"],
+                        note=f"{superseded} open question(s) superseded: absorbed into {survivor['id']}",
+                    )
                 conn.execute(
                     """INSERT INTO merges (id, run_id, survivor_record_id, absorbed_record_id, score,
                        field_survivorship, created_at)
@@ -363,7 +441,35 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
                     note=f"escalated: {issue.decision.scope_key}",
                 )
 
+            _requestion_survivor(conn, run_id, survivor["id"], merged_data, schema, policy, rule_model)
+
+        # A source row carrying no natural key is only ever a person if it
+        # matched one. CRM exports employee_id-less contacts by design, and most
+        # of them merge; the ones left over matched nobody, and there is nothing
+        # a person could type to rescue them -- the missing field is the
+        # identity itself. They stayed `clean` until a push refused them one at
+        # a time, which put them in every count of ready records in between.
+        # Settled here instead, where the evidence is: reconciliation has just
+        # had its one look at every row in the run.
+        orphans = conn.execute(
+            "UPDATE records SET status = 'incomplete', updated_at = ? "
+            "WHERE run_id = ? AND status = 'clean' AND COALESCE(TRIM(natural_key), '') = ''",
+            (utcnow(), run_id),
+        ).rowcount
+        if orphans:
+            record_change(
+                conn, run_id=run_id, actor="agent", stage="reconciled", entity_type="run",
+                entity_id=run_id, before="clean", after="incomplete",
+                note=f"{orphans} source row(s) matched no employee and carry no employee id; "
+                     "held back from the push",
+            )
         conn.execute("UPDATE runs SET stage = 'reconciled', updated_at = ? WHERE id = ?", (utcnow(), run_id))
 
+    # Out here, not inside: emit takes its own connection, and the block above
+    # holds the run's longest write transaction.
     merged = sum(1 for ids in clusters.values() if len(ids) > 1)
     emit(run_id, "stage", f"Merged into {merged:,} people", stage="reconciled", people=merged)
+    if orphans:
+        emit(run_id, "escalation",
+             f"{orphans:,} source row(s) matched nobody and have no employee id -- held back",
+             stage="reconciled", orphans=orphans)

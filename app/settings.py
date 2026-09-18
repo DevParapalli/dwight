@@ -18,10 +18,13 @@ class Settings(BaseSettings):
     groq_env_key: str | None = None
     groq_model: str = "qwen/qwen3.8-27b"
     # Tried in order after groq_model, before the local model. A hosted tier runs
-    # out of budget per model, not per account, so a second and third hosted
-    # model buy a lot of headroom before anything has to move on-device.
+    # out of budget per model, not per account, so a second hosted model buys
+    # real headroom before anything has to move on-device.
     # These are ids this account actually serves -- there is no qwen3.6.
-    groq_fallback_models: str = "openai/gpt-oss-120b,openai/gpt-oss-20b"
+    # gpt-oss-20b was dropped: it shares the 120b's ceiling without adding
+    # judgement, so the third hop is better spent on the local model, which is
+    # not metered at all. See data/samples/*_model_eval.json.
+    groq_fallback_models: str = "openai/gpt-oss-120b"
     # Groq rejects a request outright when its *expected* output exceeds the
     # account's output-tokens-per-minute ceiling, so the cap has to be explicit
     # and the value-normalization batch small enough to fit under it. Both are

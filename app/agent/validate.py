@@ -137,14 +137,39 @@ def validate_and_clean_record(
     if errors:
         issues.append(Issue(decide_validate_twice(policy), None))
 
-    # R6 ("manager_employee_id resolves to a known employee_id") needs the full
-    # set of employee_ids across every source in the run, which only exists once
-    # M5's reconciliation has seen all of them. Evaluating it per-row against an
-    # empty RuleContext would make it fail for nearly every record that has a
-    # manager at all -- deferred, not evaluated here.
-    per_row_rules = [r for r in schema.cross_field_rules if r.id != "R6"]
-    for rule_id in evaluate_rules(cleaned, per_row_rules, RuleContext()):
-        rule_field = RULE_PRIMARY_FIELD[rule_id]
-        issues.append(Issue(decide_logic_contradiction(rule_id, rule_field, policy), rule_field))
+    issues.extend(rule_issues(cleaned, schema, policy, model=model))
 
     return CleanResult(cleaned=cleaned, issues=issues)
+
+
+def rule_issues(record: dict, schema: Schema, policy: dict, model=None) -> list[Issue]:
+    """The cross-field rules a record breaks, as escalatable issues.
+
+    Every stage that writes a record goes through here, so there is one answer
+    to "what is wrong with this record" rather than one per writer. Reconcile
+    needs it because merging two sources can assemble a contradiction neither
+    source had on its own, and that write lands after validation has run.
+
+    R6 ("manager_employee_id resolves to a known employee_id") needs the full
+    set of employee_ids across every source in the run, which only exists once
+    M5's reconciliation has seen all of them. Evaluating it per-row against an
+    empty RuleContext would make it fail for nearly every record that has a
+    manager at all -- deferred, not evaluated here.
+
+    Judged through the schema's model rather than as-is: a record read back out
+    of the store is all strings, and R4's date arithmetic raises TypeError on a
+    string. A record the model rejects is judged raw -- it has a worse problem
+    than any of these rules describes, and that problem is already its own issue.
+    """
+    model = model or build_model(schema, require_all=False)
+    try:
+        judged = model(**record).model_dump()
+    except ValidationError:
+        judged = record
+
+    per_row_rules = [r for r in schema.cross_field_rules if r.id != "R6"]
+    return [
+        Issue(decide_logic_contradiction(rule_id, RULE_PRIMARY_FIELD[rule_id], policy),
+              RULE_PRIMARY_FIELD[rule_id])
+        for rule_id in evaluate_rules(judged, per_row_rules, RuleContext())
+    ]

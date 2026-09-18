@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ employee_id }} not here · target system{% endblock %}
+{% block subtitle %}no such employee{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>TARGET</b> · NOT FOUND )</div>
+    <h1>Nothing stored for <em class="serif-em">{{ employee_id }}.</em></h1>
+    <div class="when">this system has never accepted that employee, or a rollback removed it</div>
+  </div>
+  <div class="actions"><a class="btn btn-primary btn-sm" href="/">All employees</a></div>
+</div>
+
+{% endblock %}

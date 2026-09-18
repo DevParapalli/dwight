@@ -38,6 +38,13 @@ demo rows="1500":
 measure:
     uv run tools/measure_escalations.py --json data/samples/measurement.json
 
+# Every call this system makes costs tokens against the day's budget, so this is
+# not something to leave running in a loop.
+
+# Score each model in the chain on the four calls the agent actually makes
+eval *args:
+    uv run python tools/eval_models.py --json data/samples/model_eval.json {{args}}
+
 # Typeset with Centauri (the print half of Proxima). Needs the centauri checkout
 # beside this one; --root spans both so the import resolves, and its fonts must
 # be on the path or page breaks shift.
@@ -76,4 +83,5 @@ nuke port="8000":
 
 # Delete the databases outright, model cache included
 reset:
-    rm -rf data/dwight.db data/dwight.db-wal data/dwight.db-shm data/runs data/mock_target.db
+    rm -rf data/dwight.db data/dwight.db-wal data/dwight.db-shm data/runs \
+           data/mock_target.db data/mock_target.db-wal data/mock_target.db-shm

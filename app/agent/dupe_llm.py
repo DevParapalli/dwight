@@ -7,6 +7,7 @@ from app.db import connect, new_id
 from app.llm.client import LLMNotConfigured, active_model, complete_json_reported
 from app.llm.prompts import build_duplicate_judgement_prompt
 from app.progress import emit
+from app.settings import settings
 
 # Fields that say something about identity. The rest (department, salary, job
 # title) change over time for one person and would only add noise.
@@ -85,8 +86,16 @@ def judge_pair(left: dict, right: dict, run_id: str | None = None) -> dict | Non
     system_prompt, user_prompt = build_duplicate_judgement_prompt(_comparable(left), _comparable(right))
     started = time.monotonic()
     try:
+        # A reasoning model spends this budget thinking before it answers, and
+        # this call only fires on the pairs that are genuinely hard to call --
+        # exactly the ones it thinks longest about. 300 fitted the easy pairs
+        # and ran out mid-thought on an ambiguous one, which Groq returns as a
+        # 400, not as a short answer. A ceiling is not a reservation: the
+        # verdict itself is ~100 tokens and a model that stops early costs
+        # nothing for headroom it did not use.
         result, _, _served_by = complete_json_reported(
-            system_prompt, user_prompt, max_tokens=300, report=_report)
+            system_prompt, user_prompt, max_tokens=settings.llm_max_output_tokens,
+            report=_report)
     except LLMNotConfigured:
         _say("No model configured, so this pair goes to a person")
         return None

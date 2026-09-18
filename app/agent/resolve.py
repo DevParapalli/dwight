@@ -1,7 +1,12 @@
 import json
 
 from app.agent.decisions import record_decision
+from app.agent.escalate import create_or_merge_escalation
+from app.agent.policy import load_policy
+from app.agent.validate import rule_issues
 from app.audit import record_change, utcnow
+from app.schema.loader import load_schema
+from app.settings import settings
 
 VALID_ACTIONS = {"approve", "edit", "reject"}
 
@@ -81,6 +86,35 @@ def _apply_push_repair(conn, escalation, action: str, value: str | None) -> None
         field=field, before=str(before or ""), after=value,
         note="corrected after the target refused it; will be sent again on the next push",
     )
+
+    # One field corrected can contradict another that was already there -- a
+    # termination date moved past a hire date, a manager set to the employee's
+    # own id. The fill page checks for exactly this before it saves; this path
+    # did not, so an answer given here could put the record back in front of the
+    # target in a state the target refuses again, with nothing in between saying
+    # why. Raised as a question rather than refused: the answer came from a
+    # person who cannot see this screen's rejection list, and dropping their
+    # correction on the floor is the worse failure.
+    schema, policy = load_schema(settings.schema_path), load_policy()
+    asked = {
+        row["rule_id"]
+        for row in conn.execute(
+            """SELECT json_extract(context, '$.rule_id') AS rule_id FROM escalations
+               WHERE entity_id = ? AND status = 'open' AND reason_code = 'LOGIC_CONTRADICTION'""",
+            (record_id,),
+        )
+    }
+    for issue in rule_issues(data, schema, policy):
+        rule_id = (issue.decision.context or {}).get("rule_id")
+        if rule_id in asked:
+            continue
+        create_or_merge_escalation(conn, escalation["run_id"], issue.decision, entity_id=record_id)
+        record_change(
+            conn, run_id=escalation["run_id"], actor="agent", stage="resolved",
+            reason_code=issue.decision.reason_code, entity_type="record", entity_id=record_id,
+            field=issue.field, rule_id=rule_id,
+            note=f"escalated after a correction: {issue.decision.scope_key}",
+        )
 
 
 # Only reason codes whose answer can be applied to the already-processed run

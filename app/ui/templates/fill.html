@@ -89,7 +89,7 @@
         {%- if plan.action == 'replace' -%}
         Filled in {{ "{:,}".format(filled) }} row{{ '' if filled == 1 else 's' }} whose value you named.
         {%- else -%}
-        Filled in {{ "{:,}".format(filled) }} empty row{{ '' if filled == 1 else 's' }} with <code>{{ plan.value }}</code>.
+        Filled in {{ "{:,}".format(filled) }} row{{ '' if filled == 1 else 's' }} with <code>{{ plan.value }}</code>.
         {%- endif -%}
       </b>
       <span>{{ plan.reading }}
@@ -97,7 +97,7 @@
       {% if plan.action == 'replace' %}
       Replacing: {% for was, now in plan.replacements.items() %}<code>{{ was }}</code> → <code>{{ now }}</code>{{ ', ' if not loop.last }}{% endfor %}.
       Every other row was left alone.
-      {% elif filled < rows | length %}Rows that already had a value were left alone.{% endif %}
+      {% elif filled < rows | length %}Rows the agent had already proposed a correction for were left alone.{% endif %}
       Change any row you like, then save.</span>
     </span></div>
     {% elif plan_refused %}

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en" class="accent-teal">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}target system{% endblock %}</title>
+  {# Proxima comes from the agent's static directory, mounted read-only. The
+     two systems share a stylesheet, not a database. #}
+  <link rel="stylesheet" href="/static/css/proxima.css">
+  <style>
+    /* Teal accent is Proxima's (html.accent-teal); the neutrals underneath it
+       are indigo-tinted, so they are retinted here. This is how you tell at a
+       glance that you are looking at the target and not at dwight. */
+    :root {
+      --void: #060D0B; --panel: #0D1714; --panel-2: #12201C;
+      --ink-hi: #EAF5F1; --ink-mid: #A4C2BA; --ink-low: #6D8D85;
+      --hairline: rgba(150,255,230,.10); --hairline-soft: rgba(150,255,230,.055);
+    }
+    body {
+      background:
+        radial-gradient(900px 520px at 12% -12%, rgba(47,169,124,.17), transparent 62%),
+        radial-gradient(760px 480px at 94% 6%, rgba(18,131,124,.15), transparent 64%),
+        var(--void);
+      background-attachment: fixed;
+    }
+    .wrap { position: relative; z-index: 2; max-width: 1140px; margin: 0 auto; padding: 26px 20px 60px; }
+    .topline {
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      padding-bottom: 18px; margin-bottom: 26px; border-bottom: 1px solid var(--hairline-soft);
+    }
+    .topline .t-data { margin-left: auto; }
+    .foot-note { margin-top: 34px; font-size: 12.5px; color: var(--ink-low); }
+    .foot-note code { font-family: var(--font-mono); color: var(--ink-mid); }
+    /* field/value table on an employee: the label column reads as a label */
+    .kv td:first-child {
+      width: 32%; white-space: nowrap; color: var(--ink-low);
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    }
+    .kv td:nth-child(2) { color: var(--ink-hi); overflow-wrap: anywhere; }
+    .kv td.empty { color: var(--ink-low); font-style: italic; }
+    /* Proxima scopes .mono to .dtable and styles no bare anchors, so a KPI
+       value and a link in a table need saying explicitly. */
+    .kpi .k-val.mono { font-family: var(--font-mono); letter-spacing: 0; }
+    .dtable td a { color: var(--accent); text-decoration: none; }
+    .dtable td a:hover { text-decoration: underline; text-underline-offset: 3px; }
+    pre.raw {
+      margin: 0; padding: 14px 16px; border-radius: var(--r-m);
+      background: var(--well); border: 1px solid var(--hairline-soft);
+      font: 400 12px var(--font-mono); color: var(--ink-mid);
+      overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .pager { display: flex; gap: 10px; align-items: center; margin-top: 16px; }
+    .pager .count { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--ink-low); }
+  </style>
+</head>
+<body>
+
+<div class="grain" aria-hidden="true"></div>
+
+<div class="wrap">
+  <header class="topline">
+    <a class="brand" href="/">
+      <span class="orb" aria-hidden="true"></span>
+      <span>target system<small>HR MASTER · READ ONLY</small></span>
+    </a>
+    <span class="t-data">{% block subtitle %}{% endblock %}</span>
+  </header>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="foot-note">
+    This is what the target system itself holds, read straight out of its own store
+    (<code>{{ db_path }}</code>). Records arrive here only over
+    <code>POST /v1/employees</code>; nothing on these pages can change them.
+  </footer>
+</div>
+
+</body>
+</html>

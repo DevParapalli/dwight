@@ -812,11 +812,20 @@ def _per_row_rules(schema):
 def _prefill_rows(rows: list[dict], plan: dict | None) -> int:
     """Writes the plan's value onto each row it applies to. Returns how many.
 
-    `set_all` fills every row that is still empty, leaving anything the agent
-    already proposed alone. `replace` only touches rows whose current value was
-    named, which is the whole point of it: one question can cover a hundred
-    different wrong values and an instruction should be able to address them one
-    at a time without flattening the rest.
+    `set_all` fills every row, leaving alone only what the agent itself already
+    proposed -- a per-row correction it reasoned about beats one blanket value,
+    and the page says so where it lists them. `replace` only touches rows whose
+    current value was named, which is the whole point of it: one question can
+    cover a hundred different wrong values and an instruction should be able to
+    address them one at a time without flattening the rest.
+
+    It skipped rows that already held a value until a question arrived where
+    every row did. "The termination date is before the hire date" is about
+    records whose date is wrong, not missing, so the instruction box filled in
+    nothing at all and the only way through was to retype 28 dates by hand.
+    A value that is already there is the thing being corrected, not something to
+    protect -- every row on one of these pages is there because its value breaks
+    the rule.
     """
     if not plan:
         return 0
@@ -824,7 +833,7 @@ def _prefill_rows(rows: list[dict], plan: dict | None) -> int:
     filled = 0
     for row in rows:
         if plan["action"] == "set_all":
-            if not row["current"] and not row["proposed"]:
+            if not row["proposed"]:
                 row["prefill"] = plan["value"]
                 filled += 1
         elif row["current"] in plan["replacements"]:
@@ -851,15 +860,23 @@ def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | No
 
         # A question with a proposal is about the records the target actually
         # refused, because that is where the correction came from. A question
-        # about a *missing* value covers every record in the run that is missing
-        # it -- refused already or not.
+        # about a *missing* value covers every record in the run the rule still
+        # fails on -- refused already or not.
         #
         # That difference is what made the same question keep coming back. Only
         # some blank-birth-date records were push candidates at first; the rest
         # were `incomplete`. Fixing their other problems made them candidates,
         # they hit the same rule, and a fresh copy of an answered question
         # appeared. Filling the whole population answers it once.
-        widen = anchor["suggested_value"] is None
+        #
+        # "The rule still fails" is the whole of it, and it has to be, because
+        # the widened set is otherwise unbounded by the question. Selecting on a
+        # blank field instead asked 4,877 people for a termination date to
+        # answer a question about the 37 who are marked terminated without one:
+        # every still-employed record came too, and every answer was refused for
+        # breaking R3. So the rule decides membership, and a question with no
+        # rule behind it cannot widen at all -- there is nothing to decide it.
+        widen = anchor["suggested_value"] is None and rule_id is not None
         if widen:
             sql = """SELECT e.id AS escalation_id, r.id AS record_id, r.natural_key, r.data,
                             e.suggested_value,
@@ -871,9 +888,8 @@ def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | No
                        AND e.reason_code = ? AND e.signature = ?
                      WHERE r.run_id = ?
                        AND r.status IN ('clean', 'merged_survivor', 'blocked', 'incomplete')
-                       AND COALESCE(json_extract(r.data, '$.' || ?), '') = ''
                      ORDER BY r.natural_key"""
-            params = (anchor["reason_code"], anchor["signature"], run_id, field)
+            params = (anchor["reason_code"], anchor["signature"], run_id)
         else:
             sql = """SELECT e.id AS escalation_id, r.id AS record_id, r.natural_key, r.data,
                             e.suggested_value,
@@ -884,10 +900,25 @@ def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | No
                      ORDER BY r.natural_key"""
             params = (anchor["reason_code"], anchor["signature"], run_id, field)
 
-        rows = conn.execute(sql + " LIMIT ?", (*params, FILL_PAGE_SIZE)).fetchall()
-        remaining = conn.execute(
-            f"SELECT COUNT(*) AS n FROM ({sql})", params
-        ).fetchone()["n"]
+        if widen:
+            # Membership is a rule verdict, so it cannot be a WHERE clause --
+            # the rules are Python and stay that way, rather than being spelled
+            # a second time in SQL where the two could drift apart. Paging
+            # therefore happens after the filter, not in the query.
+            schema = load_schema(settings.schema_path)
+            model = build_model(schema, require_all=False)
+            rules = _per_row_rules(schema)
+            matched = [
+                row for row in conn.execute(sql, params)
+                if rule_id in evaluate_rules(
+                    _as_rule_input(model, json.loads(row["data"])), rules, RuleContext())
+            ]
+            rows, remaining = matched[:FILL_PAGE_SIZE], len(matched)
+        else:
+            rows = conn.execute(sql + " LIMIT ?", (*params, FILL_PAGE_SIZE)).fetchall()
+            remaining = conn.execute(
+                f"SELECT COUNT(*) AS n FROM ({sql})", params
+            ).fetchone()["n"]
 
     out = []
     for row in rows:

@@ -9,6 +9,7 @@ from app.llm.client import LLMNotConfigured, active_model, complete_json_reporte
 from app.llm.prompts import build_push_repair_prompt
 from app.progress import emit
 from app.schema.loader import Schema
+from app.settings import settings
 
 
 def _cache_key(target_error: str, record: dict) -> str:
@@ -128,8 +129,11 @@ def propose_repair(target_error: str, record: dict, schema: Schema,
     system_prompt, user_prompt = build_push_repair_prompt(target_error, record, schema)
     started = time.monotonic()
     try:
+        # Same reasoning-model ceiling as the duplicate judge: 400 is under what
+        # one spends thinking before it emits the correction.
         result, _, _served_by = complete_json_reported(
-            system_prompt, user_prompt, max_tokens=400, report=_report)
+            system_prompt, user_prompt, max_tokens=settings.llm_max_output_tokens,
+            report=_report)
     except LLMNotConfigured:
         _say("No model configured, so no correction was proposed")
         return None, "no model is configured, so no correction was proposed"

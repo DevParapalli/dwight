@@ -3,11 +3,16 @@
 # requires-python = ">=3.14"
 # dependencies = [
 #   "fastapi>=0.141.1",
+#   "jinja2>=3.1.6",
 #   "uvicorn>=0.53.0",
 # ]
 # ///
 """A stand-in for the Darwinbox target system: a separate process the migration
 agent pushes to over real HTTP, with its own storage.
+
+It serves its own read-only HTML at / so what it holds can be inspected without
+going through the agent, which is the only way to see the stored record rather
+than the agent's account of it.
 
 It is deliberately not mounted inside the agent. Being a genuinely external
 service is the point -- the agent has to survive transient failures, honour
@@ -29,9 +34,13 @@ import random
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI, Header, Request, Response
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 DDL = """
 CREATE TABLE IF NOT EXISTS target_employees (
@@ -74,6 +83,35 @@ state = {
 }
 
 app = FastAPI(title="mock darwinbox target")
+
+# The browsable pages borrow Proxima from the agent's static directory. A
+# stylesheet is the only thing the two systems share -- resolved from this
+# file rather than the working directory, so it holds under `just target`,
+# under compose, and from a test.
+STATIC_DIR = Path(__file__).resolve().parent.parent / "app" / "ui" / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+else:
+    print(f"warning: {STATIC_DIR} is missing, the browsable pages will render unstyled")
+
+templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "target_templates"))
+
+PAGE_SIZE = 50
+
+# This system stores UTC and is read by people in India, same as the agent.
+_DISPLAY_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _local_time(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(_DISPLAY_TZ).strftime("%d %b %Y, %H:%M")
 
 
 def _connect() -> sqlite3.Connection:
@@ -189,6 +227,98 @@ async def list_employees(run_id: str | None = None, limit: int = 50):
             ).fetchall()
             total = conn.execute("SELECT COUNT(*) AS n FROM target_employees").fetchone()["n"]
     return {"total": total, "employees": [dict(r) for r in rows]}
+
+
+@app.get("/v1/employees/{employee_id}")
+async def get_employee(employee_id: str, response: Response):
+    """The stored record itself, not a summary of it."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM target_employees WHERE employee_id = ?", (employee_id,)
+        ).fetchone()
+    if row is None:
+        response.status_code = 404
+        return {"error": "not found"}
+    return {
+        "employee_id": row["employee_id"], "run_id": row["run_id"],
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "data": json.loads(row["data"]),
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def browse_employees(request: Request, q: str = "", offset: int = 0):
+    """Everything this system holds, regardless of which run put it here."""
+    offset = max(offset, 0)
+    like = f"%{q}%"
+    with _connect() as conn:
+        total = conn.execute("SELECT COUNT(*) AS n FROM target_employees").fetchone()["n"]
+        if q:
+            # data is the whole payload as JSON, so one LIKE covers every field
+            # a person would search by -- name, email, department, cost centre.
+            matching = conn.execute(
+                "SELECT COUNT(*) AS n FROM target_employees "
+                "WHERE employee_id LIKE ? OR data LIKE ?", (like, like),
+            ).fetchone()["n"]
+            rows = conn.execute(
+                "SELECT * FROM target_employees WHERE employee_id LIKE ? OR data LIKE ? "
+                "ORDER BY updated_at DESC, employee_id LIMIT ? OFFSET ?",
+                (like, like, PAGE_SIZE, offset),
+            ).fetchall()
+        else:
+            matching = total
+            rows = conn.execute(
+                "SELECT * FROM target_employees ORDER BY updated_at DESC, employee_id "
+                "LIMIT ? OFFSET ?", (PAGE_SIZE, offset),
+            ).fetchall()
+
+    employees = []
+    for row in rows:
+        data = json.loads(row["data"])
+        name = " ".join(filter(None, [data.get("first_name"), data.get("last_name")]))
+        employees.append({
+            "employee_id": row["employee_id"],
+            "name": name or "\u2014",
+            "work_email": data.get("work_email") or "\u2014",
+            "department": data.get("department") or "\u2014",
+            "run_id": row["run_id"] or "\u2014",
+            "updated_at": _local_time(row["updated_at"]),
+        })
+
+    return templates.TemplateResponse(request, "index.html", {
+        "db_path": state["db"], "q": q, "total": total, "matching": matching,
+        "employees": employees, "offset": offset,
+        "prev_offset": max(offset - PAGE_SIZE, 0), "next_offset": offset + PAGE_SIZE,
+        "has_next": offset + len(employees) < matching,
+    })
+
+
+@app.get("/employees/{employee_id}", response_class=HTMLResponse)
+async def browse_employee(request: Request, employee_id: str):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM target_employees WHERE employee_id = ?", (employee_id,)
+        ).fetchone()
+
+    if row is None:
+        return templates.TemplateResponse(
+            request, "not_found.html",
+            {"db_path": state["db"], "employee_id": employee_id}, status_code=404,
+        )
+
+    data = json.loads(row["data"])
+    # Insertion order, which is the order the agent sent the fields in, rather
+    # than alphabetical: it keeps employee_id and the name at the top where a
+    # reader looks for them.
+    fields = [{"name": k, "value": "" if v is None else str(v)} for k, v in data.items()]
+    return templates.TemplateResponse(request, "employee.html", {
+        "db_path": state["db"], "employee_id": row["employee_id"],
+        "name": " ".join(filter(None, [data.get("first_name"), data.get("last_name")])),
+        "run_id": row["run_id"], "fields": fields,
+        "created_at": _local_time(row["created_at"]),
+        "updated_at": _local_time(row["updated_at"]),
+        "raw": json.dumps(data, indent=2, ensure_ascii=False),
+    })
 
 
 @app.post("/nuke")
