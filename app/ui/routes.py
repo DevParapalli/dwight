@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.concurrency import run_in_threadpool
 
 from app import progress
+from app.agent.clean import coerce_user_value
 from app.agent.instruct import interpret_bulk_instruction
 from app.agent.policy import RULE_DESCRIPTIONS, load_policy
 from app.agent.push import push_run, rollback_run
@@ -344,6 +345,14 @@ REASON_CODE_HELP = {
                  "them has to be treated as correct.",
         "approve": "the system you choose wins for that field, now and in future imports",
         "reject": "the agent falls back to the default order of precedence",
+    },
+    "PUSH_UNREACHABLE": {
+        "title": "The target system never answered",
+        "means": "These records were sent, but the target system failed every time "
+                 "we tried — it was down, overloaded, or rate limiting us. Nothing "
+                 "is wrong with the records and nothing was written incorrectly.",
+        "approve": "nothing is changed; push again when the target is healthy and they go through",
+        "reject": "these employees are set aside and not sent to the target system",
     },
     "PUSH_REJECTED": {
         "title": "The target system refused these records",
@@ -774,6 +783,25 @@ def _affected_records(run_id: str, reason_code: str, signature: str) -> list[dic
     return examples
 
 
+def _as_rule_input(model, data: dict) -> dict:
+    """The record as the rules expect it -- typed, not the stored JSON strings.
+    Falls back to the raw values if it will not validate, which is fine here:
+    this is only used to work out what was already broken."""
+    try:
+        return model(**data).model_dump()
+    except ValidationError:
+        return data
+
+
+def _validation_reason(exc: ValidationError) -> str:
+    """Which field, and what about it. Pydantic's bare message is "Field
+    required", which on a page about one field reads as though that field was
+    the problem."""
+    first = exc.errors()[0]
+    where = ".".join(str(part) for part in first.get("loc", ())) or "the record"
+    return f"{where}: {first.get('msg', 'not valid')}"
+
+
 def _per_row_rules(schema):
     """The rules that can be judged from one record. R6 needs the full id set,
     which only exists after reconciliation -- the same exclusion validate.py
@@ -781,36 +809,84 @@ def _per_row_rules(schema):
     return [r for r in schema.cross_field_rules if r.id != "R6"]
 
 
-def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | None, str, int]:
+def _prefill_rows(rows: list[dict], plan: dict | None) -> int:
+    """Writes the plan's value onto each row it applies to. Returns how many.
+
+    `set_all` fills every row that is still empty, leaving anything the agent
+    already proposed alone. `replace` only touches rows whose current value was
+    named, which is the whole point of it: one question can cover a hundred
+    different wrong values and an instruction should be able to address them one
+    at a time without flattening the rest.
+    """
+    if not plan:
+        return 0
+
+    filled = 0
+    for row in rows:
+        if plan["action"] == "set_all":
+            if not row["current"] and not row["proposed"]:
+                row["prefill"] = plan["value"]
+                filled += 1
+        elif row["current"] in plan["replacements"]:
+            row["prefill"] = plan["replacements"][row["current"]]
+            filled += 1
+    return filled
+
+
+def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | None, str, int, str | None]:
     """Every record behind one question, with the field they are all missing."""
     with connect() as conn:
         anchor = conn.execute(
-            "SELECT reason_code, signature, question, context FROM escalations "
-            "WHERE id = ? AND run_id = ?", (escalation_id, run_id),
+            "SELECT reason_code, signature, question, context, suggested_value "
+            "FROM escalations WHERE id = ? AND run_id = ?", (escalation_id, run_id),
         ).fetchone()
         if anchor is None:
-            return [], None, "", 0
+            return [], None, "", 0, None
 
         context = json.loads(anchor["context"]) if anchor["context"] else {}
         field = context.get("repair_field")
+        rule_id = context.get("rule_id")
         if not field:
-            return [], None, "", 0
+            return [], None, "", 0, None
 
-        rows = conn.execute(
-            """SELECT e.id AS escalation_id, r.id AS record_id, r.natural_key, r.data,
-                      e.suggested_value,
-                      json_extract(e.context, '$.employee_id') AS employee_id
-               FROM escalations e JOIN records r ON r.id = e.entity_id
-               WHERE e.run_id = ? AND e.reason_code = ? AND e.signature = ? AND e.status = 'open'
-               ORDER BY r.natural_key
-               LIMIT ?""",
-            (run_id, anchor["reason_code"], anchor["signature"], FILL_PAGE_SIZE),
-        ).fetchall()
+        # A question with a proposal is about the records the target actually
+        # refused, because that is where the correction came from. A question
+        # about a *missing* value covers every record in the run that is missing
+        # it -- refused already or not.
+        #
+        # That difference is what made the same question keep coming back. Only
+        # some blank-birth-date records were push candidates at first; the rest
+        # were `incomplete`. Fixing their other problems made them candidates,
+        # they hit the same rule, and a fresh copy of an answered question
+        # appeared. Filling the whole population answers it once.
+        widen = anchor["suggested_value"] is None
+        if widen:
+            sql = """SELECT e.id AS escalation_id, r.id AS record_id, r.natural_key, r.data,
+                            e.suggested_value,
+                            COALESCE(json_extract(e.context, '$.employee_id'), r.natural_key)
+                                AS employee_id
+                     FROM records r
+                     LEFT JOIN escalations e
+                       ON e.entity_id = r.id AND e.status = 'open'
+                       AND e.reason_code = ? AND e.signature = ?
+                     WHERE r.run_id = ?
+                       AND r.status IN ('clean', 'merged_survivor', 'blocked', 'incomplete')
+                       AND COALESCE(json_extract(r.data, '$.' || ?), '') = ''
+                     ORDER BY r.natural_key"""
+            params = (anchor["reason_code"], anchor["signature"], run_id, field)
+        else:
+            sql = """SELECT e.id AS escalation_id, r.id AS record_id, r.natural_key, r.data,
+                            e.suggested_value,
+                            json_extract(e.context, '$.employee_id') AS employee_id
+                     FROM escalations e JOIN records r ON r.id = e.entity_id
+                     WHERE e.reason_code = ? AND e.signature = ? AND e.run_id = ?
+                       AND e.status = 'open' AND ? IS NOT NULL
+                     ORDER BY r.natural_key"""
+            params = (anchor["reason_code"], anchor["signature"], run_id, field)
 
+        rows = conn.execute(sql + " LIMIT ?", (*params, FILL_PAGE_SIZE)).fetchall()
         remaining = conn.execute(
-            """SELECT COUNT(*) AS n FROM escalations
-               WHERE run_id = ? AND reason_code = ? AND signature = ? AND status = 'open'""",
-            (run_id, anchor["reason_code"], anchor["signature"]),
+            f"SELECT COUNT(*) AS n FROM ({sql})", params
         ).fetchone()["n"]
 
     out = []
@@ -818,30 +894,42 @@ def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | No
         data = json.loads(row["data"])
         out.append({
             "escalation_id": row["escalation_id"],
+            "key": row["record_id"],
             "record_id": row["record_id"],
             "employee_id": row["employee_id"] or row["natural_key"] or "",
             "name": " ".join(x for x in (data.get("first_name"), data.get("last_name")) if x),
             "current": data.get(field) or "",
             "proposed": row["suggested_value"] or "",
+            "prefill": "",
         })
-    return out, field, anchor["question"], remaining
+    return out, field, anchor["question"], remaining, rule_id
 
 
 def _apply_filled_values(run_id: str, field: str, rows: list[dict],
                          supplied: dict[str, str], schema,
-                         note: str = "") -> tuple[int, list[dict]]:
+                         note: str = "", rule_id: str | None = None) -> tuple[int, list[dict]]:
     """Validates and applies one value per record. Returns (applied, rejected).
 
-    Each value is checked by building the whole record with it and running the
-    same strict model the push uses, so anything accepted here is something the
-    target will accept -- rather than discovering it was wrong on the next push.
+    The bar is "is this value good", not "is this whole record finished". An
+    earlier version validated against the strict all-fields-required model, so a
+    record missing something unrelated could never be corrected here: supplying a
+    perfectly good termination date was refused with "Field required", naming
+    neither the field nor the reason. That made the page useless for exactly the
+    records that needed it.
+
+    So the supplied value is checked against its own field and against the
+    cross-field rules, and the record's overall completeness stays the push's
+    job -- it already marks a record `incomplete` and leaves it out, which is the
+    honest place for that to be decided.
     """
+    field_model = build_model(schema, require_all=False)
     strict_model = build_model(schema, require_all=True)
-    by_escalation = {r["escalation_id"]: r for r in rows}
+    accepted_formats = load_policy()["dates"]["accepted_formats"]
+    by_key = {r["key"]: r for r in rows}
     applied, rejected = 0, []
 
-    for escalation_id, value in supplied.items():
-        row = by_escalation.get(escalation_id)
+    for key, value in supplied.items():
+        row = by_key.get(key)
         if row is None or not value:
             continue
 
@@ -851,13 +939,21 @@ def _apply_filled_values(run_id: str, field: str, rows: list[dict],
             if record is None:
                 continue
             data = json.loads(record["data"])
+
+            # Read the way the source files are read, so a consultant can write
+            # a date the way they say it rather than the way SQLite stores it.
+            canonical, why_not = coerce_user_value(value, schema.fields[field], accepted_formats)
+            if canonical is None:
+                rejected.append({"employee_id": row["employee_id"], "value": value, "why": why_not})
+                continue
+
             try:
-                cleaned = strict_model(**{**data, field: value})
+                cleaned = field_model(**{**data, field: canonical})
             except ValidationError as exc:
                 rejected.append({
                     "employee_id": row["employee_id"],
                     "value": value,
-                    "why": exc.errors()[0].get("msg", "not a valid value for this field"),
+                    "why": _validation_reason(exc),
                 })
                 continue
 
@@ -869,23 +965,49 @@ def _apply_filled_values(run_id: str, field: str, rows: list[dict],
             # From the validated model, not the stored JSON: the rules compare
             # dates, and everything in the record's JSON is a string. Passing
             # those straight in raised a TypeError instead of failing the rule.
-            broken = evaluate_rules(cleaned.model_dump(), _per_row_rules(schema), RuleContext())
-            if broken:
+            # Compared against what the record already broke, not against a
+            # clean slate. One record can fail two rules at once -- a termination
+            # date before the hire date and a manager pointing at itself -- and
+            # each has its own question. Judging the whole record meant fixing
+            # either one was refused because the other was still broken, so
+            # neither could ever be fixed. A change answers for what it breaks
+            # and for the rule it was meant to fix; somebody else's rule is
+            # somebody else's question.
+            rules = _per_row_rules(schema)
+            before = set(evaluate_rules(_as_rule_input(field_model, data), rules, RuleContext()))
+            after = set(evaluate_rules(cleaned.model_dump(), rules, RuleContext()))
+
+            newly_broken = after - before
+            unfixed = {rule_id} & after if rule_id else set()
+            if newly_broken or unfixed:
+                reasons = []
+                if newly_broken:
+                    reasons.append("would break " + ", ".join(
+                        RULE_DESCRIPTIONS.get(r, r) for r in sorted(newly_broken)))
+                if unfixed:
+                    reasons.append("still does not fix " + ", ".join(
+                        RULE_DESCRIPTIONS.get(r, r) for r in sorted(unfixed)))
                 rejected.append({
                     "employee_id": row["employee_id"],
                     "value": value,
-                    "why": "still breaks " + ", ".join(
-                        RULE_DESCRIPTIONS.get(rule_id, rule_id) for rule_id in broken),
+                    "why": "; ".join(reasons),
                 })
                 continue
 
             before = data.get(field)
             data[field] = str(getattr(cleaned, field))
-            # A record that was held back is now genuinely clean: it passed the
-            # field model and every per-row rule above. One that was already
-            # pushable keeps the status it had -- a merge survivor stays one.
-            restored = ("clean" if record["status"] in ("excluded", "blocked", "incomplete")
-                        else record["status"])
+            # The value is good and the rules pass, but that does not make the
+            # record complete. Only promote it out of a held-back state if it
+            # would actually survive the push's own gate; otherwise say plainly
+            # that something else is still missing.
+            if record["status"] in ("excluded", "blocked", "incomplete"):
+                try:
+                    strict_model(**{**data, field: canonical})
+                    restored = "clean"
+                except ValidationError:
+                    restored = "incomplete"
+            else:
+                restored = record["status"]
             conn.execute(
                 "UPDATE records SET data = ?, status = ?, blocked_on = NULL, updated_at = ? WHERE id = ?",
                 (json.dumps(data, default=str), restored, utcnow(), row["record_id"]),
@@ -896,10 +1018,13 @@ def _apply_filled_values(run_id: str, field: str, rows: list[dict],
                 field=field, before=str(before or ""), after=data[field],
                 note=note or "corrected by a person; the agent had no safe automatic fix",
             )
-            conn.execute(
-                "UPDATE escalations SET status = 'resolved', resolved_at = ? WHERE id = ?",
-                (utcnow(), escalation_id),
-            )
+            # There may be no question about this record yet: it is being fixed
+            # before the target ever gets the chance to refuse it.
+            if row["escalation_id"]:
+                conn.execute(
+                    "UPDATE escalations SET status = 'resolved', resolved_at = ? WHERE id = ?",
+                    (utcnow(), row["escalation_id"]),
+                )
             applied += 1
 
     return applied, rejected
@@ -916,7 +1041,7 @@ async def fill_form(request: Request, run_id: str, escalation_id: str):
     place the UI stops being a queue and becomes a spreadsheet.
     """
     schema = load_schema(settings.schema_path)
-    rows, field, question, remaining = _fill_targets(run_id, escalation_id)
+    rows, field, question, remaining, _rule_id = _fill_targets(run_id, escalation_id)
     if field is None:
         return RedirectResponse(url=f"/runs/{run_id}/queue", status_code=303)
 
@@ -934,7 +1059,7 @@ async def fill_form(request: Request, run_id: str, escalation_id: str):
 @router.post("/runs/{run_id}/escalations/{escalation_id}/fill")
 async def fill_submit(request: Request, run_id: str, escalation_id: str):
     schema = load_schema(settings.schema_path)
-    rows, field, question, remaining = _fill_targets(run_id, escalation_id)
+    rows, field, question, remaining, rule_id = _fill_targets(run_id, escalation_id)
     if field is None:
         return RedirectResponse(url=f"/runs/{run_id}/queue", status_code=303)
 
@@ -951,7 +1076,11 @@ async def fill_submit(request: Request, run_id: str, escalation_id: str):
     # screen as rows rather than described in a sentence -- and one row can still
     # be corrected before saving, which an "apply to all" button cannot offer.
     if action == "interpret":
-        plan, why_not = interpret_bulk_instruction(instruction, field, remaining, schema)
+        plan, why_not = interpret_bulk_instruction(
+            instruction, field, remaining, schema,
+            current_values=[r["current"] for r in rows if r["current"]],
+        )
+        filled = _prefill_rows(rows, plan)
         return templates.TemplateResponse(
             request, "fill.html",
             {
@@ -959,32 +1088,32 @@ async def fill_submit(request: Request, run_id: str, escalation_id: str):
                 "field": field, "field_spec": schema.fields.get(field),
                 "question": question, "rows": rows, "remaining": remaining,
                 "plan": plan, "plan_refused": why_not, "instruction": instruction,
-                "prefill": plan["value"] if plan else "",
+                "filled": filled,
                 "open_escalations": open_question_count(run_id),
             },
         )
 
-    supplied = {r["escalation_id"]: (form.get(f"value-{r['escalation_id']}") or "").strip()
-                for r in rows}
+    supplied = {r["key"]: (form.get(f"value-{r['key']}") or "").strip() for r in rows}
 
     # A pasted "employee_id,value" block is the realistic path: the consultant
     # has this in a spreadsheet, not in their head. It fills any row it names
     # that the per-row inputs left blank.
-    by_employee = {r["employee_id"]: r["escalation_id"] for r in rows if r["employee_id"]}
+    by_employee = {r["employee_id"]: r["key"] for r in rows if r["employee_id"]}
     for line in (form.get("pasted") or "").splitlines():
         parts = [p.strip() for p in re.split(r"[,\t;]", line, maxsplit=1)]
         if len(parts) != 2 or not parts[1]:
             continue
-        escalation_for_employee = by_employee.get(parts[0])
-        if escalation_for_employee and not supplied.get(escalation_for_employee):
-            supplied[escalation_for_employee] = parts[1]
+        key_for_employee = by_employee.get(parts[0])
+        if key_for_employee and not supplied.get(key_for_employee):
+            supplied[key_for_employee] = parts[1]
 
     note = (f"set in bulk on the consultant instruction: {instruction}"
             if instruction else "")
-    applied, rejected = _apply_filled_values(run_id, field, rows, supplied, schema, note=note)
+    applied, rejected = _apply_filled_values(run_id, field, rows, supplied, schema,
+                                            note=note, rule_id=rule_id)
 
     if rejected:
-        rows_after, _f, question_after, remaining_after = _fill_targets(run_id, escalation_id)
+        rows_after, _f, question_after, remaining_after, _r = _fill_targets(run_id, escalation_id)
         return templates.TemplateResponse(
             request, "fill.html",
             {

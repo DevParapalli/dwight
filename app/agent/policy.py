@@ -43,6 +43,7 @@ REASON_CODE_SCOPE = {
     "DUPE_AMBIGUOUS": "pair",
     "CONFLICT_ACROSS_SOURCES": "value",
     "PUSH_REJECTED": "record",
+    "PUSH_UNREACHABLE": "record",
 }
 CLASS_SCOPED_REASON_CODES = {
     "MAP_AMBIGUOUS", "MAP_UNMAPPED", "VALUE_LOW_CONFIDENCE", "DATE_FORMAT_AMBIGUOUS",
@@ -319,6 +320,22 @@ def decide_push(employee_id: str, status_code: int, attempts: int, policy: dict,
     rejection still gets its own escalation row (it is a per-record problem),
     but they collapse into a single question in the queue with an
     apply-to-all, instead of hundreds of identical cards."""
+    if status_code in policy["push"]["retry_on"]:
+        # Retryable, and we ran out of retries. The record is fine and nothing
+        # was sent wrongly -- the target simply never answered. That is worth a
+        # question of its own, because the alternative is what it used to do:
+        # count the record as rejected, raise nothing, and let it go quiet. An
+        # upstream system being flaky must not turn into this one losing records
+        # without saying so.
+        return PolicyDecision(
+            "PUSH_UNREACHABLE", str(status_code),
+            question="The target system never gave an answer for these employees.",
+            evidence=(f"HTTP {status_code} on every one of {attempts} attempts, "
+                      "which is the retry limit in policy/escalation.yaml"),
+            suggested_action="push again once the target is healthy; nothing needs correcting",
+            context={"status_code": status_code},
+        )
+
     if status_code not in policy["push"]["escalate_on"]:
         return PolicyDecision(None)
 

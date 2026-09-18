@@ -189,6 +189,13 @@
         </div>
         {% endif %}
 
+        {% if card.fill_field and card.similar_count > 1 %}
+        {# The button on this card says "Approve all N", so the form has to mean
+           it. The checkbox below is for cards where one answer is genuinely one
+           record's answer and applying it to the rest is a separate choice. #}
+        <input type="hidden" name="apply_to_all" value="1">
+        {% endif %}
+
         {% if card.similar_count > 1 and not card.fill_field %}
         <div class="setrow">
           <div class="info">

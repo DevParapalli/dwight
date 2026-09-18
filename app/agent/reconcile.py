@@ -13,7 +13,7 @@ from app.agent.policy import (
 )
 from app.audit import record_change, utcnow
 from app.db import connect, new_id
-from app.progress import emit
+from app.progress import Ticker, emit
 from app.schema.loader import Schema
 
 
@@ -156,9 +156,14 @@ def _judge_band_pairs(run_id: str, records: dict, band_pairs: list[tuple], polic
 
     emit(run_id, "progress", f"Reviewing {len(band_pairs):,} close pair(s) before asking anyone",
          stage="reconciled", what="dupe_judge", pairs=len(band_pairs))
+    # A model call per pair, so this reports every one: a cached pair is instant
+    # and an uncached one is seconds, and the difference should be visible.
+    ticker = Ticker(run_id, "reconciled", "Reviewing close pairs",
+                    total=len(band_pairs), every=1)
 
     judgements = {}
     for a_id, b_id, _score in band_pairs:
+        ticker.tick()
         judgement = judge_pair(records[a_id]["data"], records[b_id]["data"], run_id=run_id)
         if judgement:
             judgements[f"{a_id}:{b_id}"] = judgement

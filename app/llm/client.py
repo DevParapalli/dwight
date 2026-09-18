@@ -32,6 +32,14 @@ def _parse_groq_duration(text: str) -> float | None:
 # the rest of the process rather than being re-learned per call.
 _exhausted_models: set[str] = set()
 
+# A per-minute limit recovers on its own, so the model is not retired -- it is
+# stood down until its own reset time. Without this, every later call repeated
+# the same multi-minute wait before falling back: one observed proposal took 338
+# seconds, and a hundred of them would have taken hours. The first call pays the
+# wait, discovers the limit, and the rest go straight to the next model until the
+# window reopens.
+_cooldown_until: dict[str, float] = {}
+
 
 def groq_chain() -> list[str]:
     """Hosted models to try, in order, skipping any already out of budget."""
@@ -40,16 +48,27 @@ def groq_chain() -> list[str]:
     ordered = [settings.groq_model] + [
         m.strip() for m in settings.groq_fallback_models.split(",") if m.strip()
     ]
+    now = time.monotonic()
     seen, chain = set(), []
     for model in ordered:
-        if model and model not in seen and model not in _exhausted_models:
-            seen.add(model)
-            chain.append(model)
+        if not model or model in seen or model in _exhausted_models:
+            continue
+        if _cooldown_until.get(model, 0.0) > now:
+            continue
+        seen.add(model)
+        chain.append(model)
     return chain
 
 
 def groq_available() -> bool:
     return bool(groq_chain())
+
+
+# Long enough to stop thrashing, short enough that a model is not lost for a run.
+_MAX_COOLDOWN_SECONDS = 300.0
+
+# Above this, switching models beats waiting.
+_MAX_INLINE_WAIT_SECONDS = 10.0
 
 
 def _is_daily_quota(error: Exception) -> bool:
@@ -131,7 +150,16 @@ def _complete_json_groq(system_prompt: str, user_prompt: str, max_tokens: int,
         except RateLimitError as e:
             if attempt == MAX_RATE_LIMIT_RETRIES or not _is_retryable_rate_limit(e):
                 raise
-            time.sleep(_rate_limit_delay(e, attempt))
+            delay = _rate_limit_delay(e, attempt)
+            # Waiting minutes here is the wrong trade when the caller has two
+            # more hosted models and a local one available. A short wait is
+            # cheaper than a switch; a long one is not, so hand the call back and
+            # let complete_json move down the chain and stand this model down.
+            # Measured before this: a single proposal took 338 seconds, and a
+            # hundred of them would have taken hours.
+            if delay > _MAX_INLINE_WAIT_SECONDS:
+                raise
+            time.sleep(delay)
     latency_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
     return json.loads(response.choices[0].message.content), latency_ms
 
@@ -210,6 +238,13 @@ def complete_json(system_prompt: str, user_prompt: str, max_tokens: int | None =
                 _exhausted_models.update(chain)
             elif _is_daily_quota(exc):
                 _exhausted_models.add(model)
+            else:
+                # A per-minute limit. Stand this model down until its own reset
+                # time rather than rediscovering the limit on every call.
+                wait = min(_rate_limit_delay(exc, 0), _MAX_COOLDOWN_SECONDS)
+                _cooldown_until[model] = time.monotonic() + wait
+                print(f"{model} rate limited; standing it down for {wait:.0f}s",
+                      file=sys.stderr)
 
             remaining = chain[position + 1:] if not isinstance(exc, APIConnectionError) else []
             next_model = (remaining[0] if remaining

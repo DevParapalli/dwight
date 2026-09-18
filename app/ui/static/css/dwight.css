@@ -184,3 +184,37 @@
 .xsamples code { font-size: 11.5px; padding: 3px 8px; border-radius: 5px;
   background: var(--glass-2); color: var(--ink-mid); border: 1px solid var(--hairline-soft);
   max-width: 100%; overflow-wrap: anywhere; }
+
+/* -- run progress bar -------------------------------------- */
+/* A working run says so where you are already looking. Sits above the activity
+   feed rather than inside it, so it does not scroll away. */
+.runbar { margin-bottom: 14px; }
+.runbar-head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin-bottom: 6px; }
+.runbar-what { font-size: 13px; color: var(--ink-hi); font-weight: 500; }
+.runbar-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-low);
+  white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.runbar-bar { -webkit-appearance: none; appearance: none; display: block;
+  width: 100%; height: 6px; border: 0; border-radius: var(--r-full);
+  background: var(--glass-2); overflow: hidden; }
+.runbar-bar::-webkit-progress-bar { background: var(--glass-2); border-radius: var(--r-full); }
+.runbar-bar::-webkit-progress-value { background: var(--accent); border-radius: var(--r-full);
+  transition: width .25s ease-out; }
+.runbar-bar::-moz-progress-bar { background: var(--accent); border-radius: var(--r-full); }
+
+/* No value means no known total: sweep instead of filling, so "working" still
+   reads differently from "stalled". */
+.runbar-bar:not([value]) { position: relative; }
+.runbar-bar:not([value])::after {
+  content: ''; position: absolute; inset: 0; border-radius: var(--r-full);
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  width: 40%; animation: runbar-sweep 1.4s ease-in-out infinite;
+}
+@keyframes runbar-sweep { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
+@media (prefers-reduced-motion: reduce) {
+  .runbar-bar:not([value])::after { animation: none; opacity: .5; width: 100%; }
+}
+
+/* A submitted button that is waiting on the server. */
+.btn[aria-busy="true"] { opacity: .75; cursor: progress; }

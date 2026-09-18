@@ -1,3 +1,22 @@
+{# Every ticker frame already carries done/total; it was only ever rendered as a
+   small chip beside the message. A run that is working should say so where you
+   are looking, not in the newest line of a list. #}
+{% set last_progress = (frames | selectattr('detail.total') | list | last) %}
+<div class="runbar{{ ' is-idle' if not is_active else '' }}" id="runbar"
+     {% if not is_active %}hidden{% endif %}>
+  <div class="runbar-head">
+    <span class="runbar-what" id="runbar-what">
+      {{ last_progress.detail.what if last_progress else 'Working' }}
+    </span>
+    <span class="runbar-count t-data" id="runbar-count">
+      {%- if last_progress %}{{ "{:,}".format(last_progress.detail.done) }} of {{ "{:,}".format(last_progress.detail.total) }}{% endif -%}
+    </span>
+  </div>
+  <progress id="runbar-bar" class="runbar-bar"
+    {%- if last_progress %} value="{{ last_progress.detail.done }}" max="{{ last_progress.detail.total }}"{% endif %}>
+  </progress>
+</div>
+
 {# Shared live activity feed. Used by the overview and the push page so there is
    one SSE client, not two. A page that wants to react to the periodic snapshot
    defines window.dwightOnSnapshot before including this. #}
@@ -95,9 +114,40 @@
         chip.hidden = false;
       }
 
+      updateBar(frame);
+
       // Newest first: the thing you want to read is at the top, and the list
       // does not scroll away from you while the agent works.
       list.insertBefore(node, list.firstChild);
+    }
+
+    var bar = document.getElementById('runbar');
+    var barEl = document.getElementById('runbar-bar');
+    var barWhat = document.getElementById('runbar-what');
+    var barCount = document.getElementById('runbar-count');
+
+    function updateBar(frame) {
+      if (!bar) { return; }
+      var d = frame.detail || {};
+
+      if (frame.kind === 'finished' || frame.kind === 'waiting' || frame.kind === 'failed') {
+        bar.hidden = true;
+        return;
+      }
+      bar.hidden = false;
+
+      if (d.total) {
+        barEl.value = d.done;
+        barEl.max = d.total;
+        barCount.textContent = Number(d.done).toLocaleString() + ' of ' + Number(d.total).toLocaleString();
+      } else {
+        // No total to count against -- an indeterminate bar still says the
+        // difference between working and stalled, which is the point.
+        barEl.removeAttribute('value');
+        barCount.textContent = '';
+      }
+      if (d.what) { barWhat.textContent = d.what; }
+      else if (frame.kind === 'stage') { barWhat.textContent = frame.message; }
     }
 
     retime();

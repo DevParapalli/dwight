@@ -72,5 +72,32 @@
   </div>
 </div>
 
+<script>
+  // A form POST that pushes thousands of records, or saves hundreds of filled
+  // rows, takes real time and the browser gives no sign of it. Progressive
+  // enhancement only: without JavaScript the form still submits exactly as it
+  // did, it just does not say so.
+  (function () {
+    document.addEventListener('submit', function (e) {
+      var form = e.target;
+      if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== 'post') { return; }
+
+      var button = form.querySelector('button[type="submit"]:focus')
+                || form.querySelector('.btn-primary, .btn-danger, button[type="submit"]');
+      if (!button || button.dataset.busy) { return; }
+
+      button.dataset.busy = '1';
+      button.dataset.label = button.textContent.trim();
+      button.textContent = 'Working\u2026';
+      button.setAttribute('aria-busy', 'true');
+      // Left enabled until the next paint so the click still submits its name
+      // and value, which a disabled button would drop.
+      window.setTimeout(function () {
+        form.querySelectorAll('button[type="submit"]').forEach(function (b) { b.disabled = true; });
+      }, 0);
+    });
+  })();
+</script>
+
 </body>
 </html>

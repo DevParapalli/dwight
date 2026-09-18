@@ -71,8 +71,10 @@
       <label for="instruction">Your instruction</label>
       <input id="instruction" name="instruction" type="text" value="{{ instruction or '' }}"
              placeholder="set date of birth to 1919-01-01, we will remap it in prod later">
-      <span class="help">It can set this one field to one value for every row. It cannot choose a
-        different field, give different rows different values, or invent a value you did not name.</span>
+      <span class="help">Two things it understands: one value for every row
+        ("set it to 1919-01-01"), or named replacements
+        ("replace Dircetor with Director"). It cannot choose a different field or
+        invent a value you did not name.</span>
     </div>
 
     <div style="margin-top:12px">
@@ -83,11 +85,19 @@
 
     {% if plan %}
     <div class="callout" style="margin-top:12px"><span aria-hidden="true">✓</span><span>
-      {% set blanks = rows | rejectattr('current') | list | length %}
-      <b>Filled in {{ "{:,}".format(blanks) }} empty row{{ '' if blanks == 1 else 's' }} with <code>{{ plan.value }}</code>.</b>
+      <b>
+        {%- if plan.action == 'replace' -%}
+        Filled in {{ "{:,}".format(filled) }} row{{ '' if filled == 1 else 's' }} whose value you named.
+        {%- else -%}
+        Filled in {{ "{:,}".format(filled) }} empty row{{ '' if filled == 1 else 's' }} with <code>{{ plan.value }}</code>.
+        {%- endif -%}
+      </b>
       <span>{{ plan.reading }}
       {% if plan.placeholder %} It is recorded as a deliberate placeholder in the audit trail.{% endif %}
-      {% if blanks < rows | length %}Rows that already had a value were left alone.{% endif %}
+      {% if plan.action == 'replace' %}
+      Replacing: {% for was, now in plan.replacements.items() %}<code>{{ was }}</code> → <code>{{ now }}</code>{{ ', ' if not loop.last }}{% endfor %}.
+      Every other row was left alone.
+      {% elif filled < rows | length %}Rows that already had a value were left alone.{% endif %}
       Change any row you like, then save.</span>
     </span></div>
     {% elif plan_refused %}
@@ -137,12 +147,12 @@
             <td>{{ r.name or '—' }}</td>
             <td class="mono was">{{ r.current or '(empty)' }}</td>
             <td>
-              <label class="sr-only" for="value-{{ r.escalation_id }}">
+              <label class="sr-only" for="value-{{ r.key }}">
                 {{ field | replace('_', ' ') }} for {{ r.employee_id or r.name or 'this record' }}
               </label>
-              <input id="value-{{ r.escalation_id }}" name="value-{{ r.escalation_id }}"
+              <input id="value-{{ r.key }}" name="value-{{ r.key }}"
                      type="{{ 'date' if field_spec and field_spec.type == 'date' else 'text' }}"
-                     value="{{ r.proposed or prefill or '' }}">
+                     value="{{ r.prefill or r.proposed or '' }}">
             </td>
           </tr>
           {% else %}

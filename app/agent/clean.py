@@ -60,6 +60,17 @@ def _slash_date_ambiguous(raw: str) -> bool:
     return day_first_valid and month_first_valid
 
 
+# The window a decoded number has to land in to be believed as a date. It exists
+# to stop an ordinary number being read as one, so the bound that matters is the
+# upper one. The lower bound used to be 1990, which is a defensible floor for a
+# hire date and an indefensible one for a date of birth: it silently dropped the
+# birth date of every employee born before 1990 that arrived as an Excel serial
+# -- 39 of 76 in the sample data, with no value and no escalation, which is
+# exactly the silent degradation the rest of this system is built to avoid.
+_PLAUSIBLE_FROM = date(1920, 1, 1)
+_PLAUSIBLE_TO = date(2100, 1, 1)
+
+
 def parse_date_value(value, accepted_formats: list[str]) -> tuple[date | None, bool]:
     """Returns (parsed_date, ambiguous). ambiguous=True means the value could
     plausibly be two different valid dates and nothing here should guess which."""
@@ -81,7 +92,7 @@ def parse_date_value(value, accepted_formats: list[str]) -> tuple[date | None, b
     if "excel_serial" in accepted_formats and _NUMERIC_STRING_RE.match(raw) and len(raw) <= 6:
         try:
             d = EXCEL_EPOCH + timedelta(days=int(raw))
-            if date(1990, 1, 1) <= d <= date(2100, 1, 1):
+            if _PLAUSIBLE_FROM <= d <= _PLAUSIBLE_TO:
                 return d, False
         except (ValueError, OverflowError):
             pass
@@ -89,7 +100,7 @@ def parse_date_value(value, accepted_formats: list[str]) -> tuple[date | None, b
     if "epoch_seconds" in accepted_formats and _NUMERIC_STRING_RE.match(raw) and len(raw) in (9, 10):
         try:
             d = datetime.fromtimestamp(int(raw), tz=UTC).date()
-            if date(1990, 1, 1) <= d <= date(2100, 1, 1):
+            if _PLAUSIBLE_FROM <= d <= _PLAUSIBLE_TO:
                 return d, False
         except (ValueError, OSError, OverflowError):
             pass
@@ -158,3 +169,35 @@ def coerce_enum(value, allowed_values: list[str],
     if best_distance is not None and best_distance <= max_auto_edit_distance:
         return best_allowed, best_distance, best_allowed
     return None, best_distance if best_distance is not None else 999, best_allowed
+
+
+def coerce_user_value(raw: str, field, accepted_formats: list[str]) -> tuple[str | None, str]:
+    """Turns a value a person typed into the form the field actually stores.
+
+    Returns (canonical, why_not). People write dates the way they say them --
+    18-09-2026 -- and both places that value can land reject it: an
+    `<input type="date">` silently blanks anything that is not YYYY-MM-DD, and
+    Pydantic will not parse it either. Reading it with the same parser the
+    pipeline uses means a consultant can write a date the way the source files do.
+
+    An ambiguous date is refused rather than guessed, for the same reason the
+    pipeline escalates one: 03/04/2024 is two different days and neither of them
+    is worth picking on someone's behalf.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None, "no value given"
+
+    if getattr(field, "type", None) == "date":
+        parsed, ambiguous = parse_date_value(value, accepted_formats)
+        if ambiguous:
+            return None, (f"{value!r} could be two different dates -- "
+                          "write it as YYYY-MM-DD to be unambiguous")
+        if parsed is None:
+            return None, f"{value!r} is not a date this system can read"
+        return parsed.isoformat(), ""
+
+    if getattr(field, "values", None) and value not in field.values:
+        return None, f"{value!r} is not an allowed value for {field.name}"
+
+    return value, ""

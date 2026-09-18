@@ -74,9 +74,15 @@ def _propose_repairs(run_id: str, schema, examples: dict[tuple[str, str], dict])
     emit(run_id, "progress",
          f"Looking for a fix for {len(examples)} refused value(s)",
          stage="pushing", what="repair", kinds=len(examples))
+    # One model call per distinct refused value, so this is the slowest step in
+    # the run and the one most likely to look like a hang. every=1 because each
+    # tick is seconds, not milliseconds.
+    ticker = Ticker(run_id, "pushing", "Working out corrections",
+                    total=len(examples), every=1)
 
     failures = 0
     for (sig, target_error), payload in examples.items():
+        ticker.tick()
         named = mentioned_fields(target_error, schema)
         field = next(iter(named)) if len(named) == 1 else None
         if field:
@@ -211,16 +217,31 @@ def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
             r["employee_id"]: r["payload_hash"]
             for r in conn.execute("SELECT employee_id, payload_hash FROM pushed_state")
         }
+        # What the target already refused, taken from the open questions
+        # themselves: each one stores the payload it was raised for. No extra
+        # bookkeeping -- the question *is* the record of the refusal.
+        already_refused = {
+            json.loads(r["context"])["payload"].get("employee_id"):
+                _payload_hash(json.loads(r["context"])["payload"])
+            for r in conn.execute(
+                """SELECT context FROM escalations
+                   WHERE run_id = ? AND reason_code = 'PUSH_REJECTED' AND status = 'open'
+                     AND json_extract(context, '$.payload') IS NOT NULL""",
+                (run_id,),
+            )
+        }
 
     emit(run_id, "stage", f"Pushing {len(candidates):,} reconciled employee(s)",
          stage="pushing", total=len(candidates))
     ticker = Ticker(run_id, "pushing", "Pushed", total=len(candidates), every=250)
 
     pushed = rejected = incomplete = unchanged = changed = created = retries = 0
+    unchanged_refused = 0
     attempts_rows: list[tuple] = []
     rejections: list[tuple[str, str, int, int, str, dict]] = []
     incomplete_ids: list[str] = []
     pushed_state_rows: list[tuple] = []
+    delivered_ids: list[str] = []
     examples: dict[tuple[str, str], dict] = {}
 
     for record in candidates:
@@ -240,6 +261,15 @@ def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
         previous = already_pushed.get(employee_id)
         if previous == digest:
             unchanged += 1
+            continue
+
+        # There is already an open question about this record, and nothing about
+        # it has changed since. The target will say exactly the same thing, and
+        # the only result would be a second copy of a question the consultant
+        # already has -- which is what made a partly-answered class look like it
+        # kept coming back. A corrected record hashes differently and goes.
+        if already_refused.get(employee_id) == digest:
+            unchanged_refused += 1
             continue
         if previous is None:
             created += 1
@@ -282,12 +312,14 @@ def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
         if status == 200:
             pushed += 1
             pushed_state_rows.append((employee_id, digest, run_id, utcnow()))
+            delivered_ids.append(record["id"])
         else:
             rejected += 1
             # The payload travels with the rejection: a corrected value can only
             # be proposed later against what was actually sent.
             rejections.append((record["id"], employee_id, status, cfg["max_retries"] + 1,
                                str(body.get("error", "")), data))
+
 
     with connect() as conn:
         conn.executemany(
@@ -304,6 +336,17 @@ def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
                    pushed_at = excluded.pushed_at""",
             pushed_state_rows,
         )
+        # "The target never answered for this one" stops being true the moment
+        # it does. Left open, it would be a question with nothing to answer and
+        # a count that never goes down.
+        for record_id in delivered_ids:
+            conn.execute(
+                """UPDATE escalations SET status = 'resolved', resolved_at = ?
+                   WHERE run_id = ? AND reason_code = 'PUSH_UNREACHABLE'
+                     AND entity_id = ? AND status = 'open'""",
+                (utcnow(), run_id, record_id),
+            )
+
         for record_id in incomplete_ids:
             conn.execute(
                 "UPDATE records SET status = 'incomplete', updated_at = ? WHERE id = ?",
@@ -342,7 +385,9 @@ def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
     failure_rate = (rejected / total) if total else 0.0
     emit(run_id, "finished",
          (f"Pushed {pushed:,} ({created:,} new, {changed:,} changed), "
-          f"skipped {unchanged:,} unchanged, {rejected:,} refused"),
+          f"skipped {unchanged:,} unchanged, {rejected:,} refused"
+          + (f", {unchanged_refused:,} left alone because the target already "
+             "refused them unchanged" if unchanged_refused else "")),
          stage="done", pushed=pushed, rejected=rejected, unchanged=unchanged,
          incomplete=incomplete, failure_rate=round(failure_rate, 4))
     return {
@@ -350,6 +395,7 @@ def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
         "created": created,
         "changed": changed,
         "unchanged_skipped": unchanged,
+        "refused_before_skipped": unchanged_refused,
         "rejected": rejected,
         "incomplete": incomplete,
         "attempts": len(attempts_rows),
@@ -369,9 +415,14 @@ def rollback_run(run_id: str) -> dict:
             (run_id,),
         ).fetchall()
 
+    emit(run_id, "stage", f"Rolling back {len(pushed):,} employee(s) from the target",
+         stage="pushing", total=len(pushed))
+    ticker = Ticker(run_id, "pushing", "Rolled back", total=len(pushed), every=100)
+
     removed = 0
     removed_ids: list[str] = []
     for row in pushed:
+        ticker.tick()
         employee_id = row["natural_key"] or json.loads(row["data"]).get("employee_id")
         if not employee_id:
             continue
