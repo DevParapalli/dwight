@@ -1,0 +1,27 @@
+version: 1
+mapping:
+  auto_accept_min_confidence: 0.85
+  ambiguous_top2_margin: 0.10
+  unmapped_below: 0.50
+values:
+  auto_accept_min_confidence: 0.80
+  enum_auto_max_edit_distance: 1
+  enum_escalate_max_edit_distance: 3
+dates:
+  accepted_formats: ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%d %b %Y", "%Y/%m/%d", "excel_serial", "epoch_seconds"]
+  escalate_when_multiple_formats_parse_to_different_dates: true
+dedupe:
+  auto_merge_above: 0.90
+  escalate_band: [0.72, 0.90]
+validation:
+  max_correction_attempts: 1
+cross_source:
+  precedence: [legacy_hris, payroll, crm]
+  escalate_conflicts_only_on_material_fields: true
+push:
+  max_retries: 4
+  backoff_base_ms: 250
+  jitter: true
+  retry_on: [429, 500, 502, 503, 504]
+  escalate_on: [400, 409, 422]
+  offer_rollback_above_failure_rate: 0.10

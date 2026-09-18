@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% set nav_page = 'summary' %}
+{% block title %}Run overview · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block topbar_right %}
+  <span class="live" id="live-pill" hidden><i></i><span id="live-word">live</span></span>
+{% endblock %}
+
+{% block head %}
+{# Without JavaScript there is no stream, so the page falls back to reloading
+   itself. With JavaScript this never fires and nothing on the page reloads. #}
+{% if is_active %}<noscript><meta http-equiv="refresh" content="5"></noscript>{% endif %}
+{% endblock %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>RUN</b> · <span id="stage-word">{{ stage | upper }}</span> )</div>
+    <h1 id="headline">{{ status.message }}</h1>
+    <div class="when" id="doing">
+      {% if is_active %}Working.{% else %}Nothing running.{% endif %}
+    </div>
+  </div>
+  <div class="actions" id="actions">
+    {% if status.waiting and stage == "mapped" %}
+      <a class="btn btn-primary" href="/runs/{{ run_id }}/queue">Review flagged columns</a>
+    {% elif status.waiting and stage == "reconciled" %}
+      <form method="post" action="/runs/{{ run_id }}/push">
+        <button class="btn btn-primary" type="submit">Approve push to target</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="mosaic" id="counters">
+  {% for r in record_counts %}
+  <div class="kpi m-3" data-status="{{ r.status }}">
+    <div class="k-label">( {{ r.status | upper | replace('_', ' ') }} )</div>
+    <div class="k-val">{{ "{:,}".format(r.n) }}</div>
+    <div class="k-foot"><span>
+      {%- if r.status == 'merged' %}absorbed into other records
+      {%- elif r.status == 'merged_survivor' %}one per person, after merging
+      {%- elif r.status == 'blocked' %}waiting on a decision
+      {%- elif r.status == 'incomplete' %}missing a required field
+      {%- else %}records{% endif -%}
+    </span></div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="cols-main">
+  <div class="stack">
+    <section class="card">
+      <header>
+        <h3>What the agent is doing</h3>
+        <p id="activity-sub">Every step, in order, as it happens.</p>
+      </header>
+      <ol class="activity" id="activity" aria-live="polite" aria-relevant="additions">
+        {% for f in frames %}
+        <li class="act act-{{ f.kind }}">
+          <span class="act-time">{{ f.ts[11:19] }}</span>
+          <span class="act-dot" aria-hidden="true"></span>
+          <span class="act-msg">{{ f.message }}</span>
+          {% if f.detail.get('total') %}<span class="chip-f">{{ f.detail.done }}/{{ f.detail.total }}</span>{% endif %}
+        </li>
+        {% else %}
+        {# A working run with no frames yet is about to have some, so hold the
+           shape rather than showing an empty box that then grows a row at a
+           time. aria-hidden because there is nothing here to read out. #}
+        {% if is_active %}
+        {% for _ in range(6) %}
+        <li class="act act-idle" aria-hidden="true">
+          <span class="act-time skel" style="height:11px"></span>
+          <span class="act-dot"></span>
+          <span class="act-msg skel skel-line {{ ['w-90','w-60','w-75','w-40'][loop.index0 % 4] }}"></span>
+        </li>
+        {% endfor %}
+        {% else %}
+        <li class="act act-idle"><span class="act-msg">No activity recorded yet.</span></li>
+        {% endif %}
+        {% endfor %}
+      </ol>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="card">
+      <header><h3>Open questions</h3></header>
+      {% if escalations %}
+      <div class="dtable">
+        <table>
+          <thead><tr><th>Reason</th><th>Questions</th><th>Rows</th></tr></thead>
+          <tbody>
+            {% for e in escalations %}
+            <tr>
+              <td>
+                {% if e.reason_code in ('LOGIC_CONTRADICTION', 'PUSH_REJECTED') %}
+                <span class="pill pill-rose"><i class="dot"></i>{{ e.reason_code }}</span>
+                {% elif e.reason_code in ('DUPE_AMBIGUOUS', 'CONFLICT_ACROSS_SOURCES') %}
+                <span class="pill pill-amber"><i class="dot"></i>{{ e.reason_code }}</span>
+                {% else %}
+                <span class="pill pill-sky"><i class="dot"></i>{{ e.reason_code }}</span>
+                {% endif %}
+              </td>
+              <td class="mono">{{ "{:,}".format(e.n) }}</td>
+              <td class="mono">{{ "{:,}".format(e.affected or 0) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top:14px"><a class="btn btn-glass btn-sm" href="/runs/{{ run_id }}/queue">Open the queue</a></div>
+      {% elif is_active %}
+      <div aria-hidden="true">
+        {% for _ in range(3) %}
+        <div class="skel-row">
+          <span class="skel skel-chip"></span>
+          <span class="skel skel-line w-40"></span>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="t-data" style="margin-top:10px">Counting as the run works.</p>
+      {% else %}
+      <div class="callout"><span aria-hidden="true">✓</span><span><b>Nothing waiting on you.</b> <span>Every question in this run is answered.</span></span></div>
+      {% endif %}
+    </section>
+  </div>
+</div>
+
+{# Cloned per frame by the stream. Keeping the markup here rather than building
+   strings in JS means the live rows are the same markup the server renders. #}
+<template id="frame-template">
+  <li class="act">
+    <span class="act-time"></span>
+    <span class="act-dot" aria-hidden="true"></span>
+    <span class="act-msg"></span>
+    <span class="chip-f" hidden></span>
+  </li>
+</template>
+
+<style>
+  .activity { list-style:none; margin:0; padding:0; max-height:52vh; overflow-y:auto; }
+  .act { display:flex; align-items:baseline; gap:10px; padding:7px 2px;
+         border-bottom:1px solid var(--hairline-soft); }
+  .act:last-child { border-bottom:0; }
+  .act-time { font-family:var(--font-mono); font-size:11px; color:var(--ink-low);
+              flex:0 0 auto; min-width:58px; }
+  .act-dot { width:5px; height:5px; border-radius:var(--r-full); flex:0 0 auto;
+             background:var(--ink-low); }
+  .act-stage .act-dot { background:var(--accent); }
+  .act-escalation .act-dot { background:var(--amber); }
+  .act-waiting .act-dot { background:var(--amber); }
+  .act-finished .act-dot { background:var(--mint); }
+  .act-msg { color:var(--ink-mid); font-size:13.5px; flex:1 1 auto; }
+  .act-stage .act-msg { color:var(--ink-hi); }
+  .act-new { animation:actin .25s ease-out; }
+  @keyframes actin { from { opacity:0; transform:translateY(-3px); } to { opacity:1; transform:none; } }
+  @media (prefers-reduced-motion:reduce) { .act-new { animation:none; } }
+</style>
+
+<script>
+  (function () {
+    if (!window.EventSource) { return; }   // <noscript> refresh already covers this
+
+    var list = document.getElementById('activity');
+    var tpl = document.getElementById('frame-template');
+    var pill = document.getElementById('live-pill');
+    var liveWord = document.getElementById('live-word');
+    var doing = document.getElementById('doing');
+    var stageWord = document.getElementById('stage-word');
+    var headline = document.getElementById('headline');
+    var counters = document.getElementById('counters');
+    var seen = Object.create(null);
+    var lastStage = {{ stage | tojson }};
+
+    // The server already rendered every frame it had. Record those ids so the
+    // replay on connect doesn't draw them a second time.
+    {% for f in frames %}seen[{{ f.seq }}] = 1;{% endfor %}
+
+    if (pill) { pill.hidden = false; }
+
+    function addFrame(frame) {
+      if (seen[frame.seq]) { return; }
+      seen[frame.seq] = 1;
+
+      // Every placeholder goes on the first real frame, not one per frame.
+      var idle = list.querySelectorAll('.act-idle');
+      for (var i = 0; i < idle.length; i++) { idle[i].remove(); }
+
+      var node = tpl.content.firstElementChild.cloneNode(true);
+      node.classList.add('act-' + frame.kind, 'act-new');
+      node.querySelector('.act-time').textContent = (frame.ts || '').slice(11, 19);
+      node.querySelector('.act-msg').textContent = frame.message;
+
+      var chip = node.querySelector('.chip-f');
+      if (frame.detail && frame.detail.total) {
+        chip.textContent = frame.detail.done + '/' + frame.detail.total;
+        chip.hidden = false;
+      }
+
+      list.appendChild(node);
+      list.scrollTop = list.scrollHeight;
+      if (doing) { doing.textContent = frame.message; }
+    }
+
+    function applySnapshot(s) {
+      if (stageWord) { stageWord.textContent = (s.stage || '').toUpperCase(); }
+
+      Object.keys(s.records).forEach(function (status) {
+        var tile = counters.querySelector('[data-status="' + status + '"] .k-val');
+        if (tile) { tile.textContent = s.records[status].toLocaleString(); }
+      });
+
+      // The stage changed, so the server-rendered actions and headline are now
+      // stale. Reload once, quietly, instead of re-implementing that logic here.
+      if (s.stage !== lastStage) {
+        lastStage = s.stage;
+        if (['reconciled', 'mapped', 'done', 'rolled_back'].indexOf(s.stage) !== -1) {
+          window.setTimeout(function () { window.location.reload(); }, 900);
+        }
+      }
+    }
+
+    var source = new EventSource('/runs/{{ run_id }}/events');
+
+    source.addEventListener('frame', function (e) { addFrame(JSON.parse(e.data)); });
+    source.addEventListener('snapshot', function (e) { applySnapshot(JSON.parse(e.data)); });
+
+    source.onopen = function () { if (liveWord) { liveWord.textContent = 'live'; } };
+    source.onerror = function () {
+      // EventSource reconnects by itself and sends Last-Event-ID, so the stream
+      // resumes from the last frame drawn rather than replaying everything.
+      if (liveWord) { liveWord.textContent = 'reconnecting'; }
+    };
+  })();
+</script>
+
+{% endblock %}

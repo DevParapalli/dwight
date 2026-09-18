@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% set nav_page = 'audit' %}
+{% block title %}Audit · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>AUDIT</b> )</div>
+    <h1>Everything that changed, and why.</h1>
+    <div class="when" aria-live="polite">{{ "{:,}".format(total) }} event{{ '' if total == 1 else 's' }} in this run. Showing the first {{ page_size }} that match.</div>
+  </div>
+  <div class="actions">
+    <a class="btn btn-glass btn-sm" href="/runs/{{ run_id }}/audit.csv?actor={{ filters.actor }}&stage={{ filters.stage }}&reason_code={{ filters.reason_code }}">Export CSV</a>
+    <a class="btn btn-ghost btn-sm" href="/runs/{{ run_id }}/audit.json?actor={{ filters.actor }}&stage={{ filters.stage }}&reason_code={{ filters.reason_code }}">JSON</a>
+  </div>
+</div>
+
+<div class="card">
+  <form method="get" action="/runs/{{ run_id }}/audit" style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+    <div class="field" style="margin:0">
+      <label for="actor">Actor</label>
+      <span class="selwrap">
+        <select id="actor" name="actor">
+          <option value="">all</option>
+          {% for a in actors %}
+          <option value="{{ a }}" {% if filters.actor == a %}selected{% endif %}>{{ a }}</option>
+          {% endfor %}
+        </select>
+      </span>
+    </div>
+    <div class="field" style="margin:0">
+      <label for="stage">Stage</label>
+      <span class="selwrap">
+        <select id="stage" name="stage">
+          <option value="">all</option>
+          {% for s in stages %}
+          <option value="{{ s }}" {% if filters.stage == s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </span>
+    </div>
+    <div class="field" style="margin:0">
+      <label for="reason_code">Reason code</label>
+      <input id="reason_code" name="reason_code" type="text" value="{{ filters.reason_code }}" placeholder="any">
+    </div>
+    <button class="btn btn-glass btn-sm" type="submit">Filter</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="dtable">
+    <table>
+      <thead>
+        <tr>{% for c in columns %}<th>{{ c | replace('_', ' ') }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          {% for c in columns %}
+          {% if c == 'actor' %}
+          <td>
+            {% if row.actor == 'human' %}
+            <span class="pill pill-sky"><i class="dot"></i>human</span>
+            {% elif row.actor == 'llm' %}
+            <span class="pill pill-mint"><i class="dot"></i>model</span>
+            {% else %}
+            <span class="pill pill-mute"><i class="dot"></i>{{ row.actor }}</span>
+            {% endif %}
+          </td>
+          {% elif c == 'ts' %}
+          <td class="mono">{{ row.ts[:19] if row.ts else "" }}</td>
+          {% else %}
+          <td class="mono">{{ row[c] if row[c] is not none else "" }}</td>
+          {% endif %}
+          {% endfor %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{{ columns | length }}">No events match these filters.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,48 @@
+services:
+  # The migration agent.
+  dwight:
+    build:
+      context: .
+      dockerfile: Containerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Reach the target by service name rather than localhost: it is a
+      # separate process here for the same reason it is separate in dev.
+      TARGET_API_URL: http://target:8900/v1
+      # Testing convenience: POST /nuke empties every table. The route is not
+      # registered at all when this is unset.
+      ENABLE_NUKE: "true"
+    volumes:
+      - dwight-data:/app/data
+    depends_on:
+      - target
+
+  # Stand-in for the Darwinbox target system. Deliberately its own service with
+  # its own store, so a push is real HTTP to something this agent does not own
+  # and a rollback is externally observable. It clears its own store on /nuke --
+  # neither system reaches into the other's database.
+  target:
+    build:
+      context: .
+      dockerfile: Containerfile
+    command: ["uv", "run", "--no-sync", "python", "tools/mock_target_api.py",
+              "--host", "0.0.0.0", "--port", "8900",
+              "--db", "data/mock_target.db", "--enable-nuke"]
+    ports:
+      - "8900:8900"
+    volumes:
+      - dwight-data:/app/data
+
+# A named volume rather than a bind mount. Under rootless podman the container
+# user maps to a subuid that cannot write a host directory owned by your
+# account, and on Fedora SELinux blocks an unlabelled bind mount besides. The
+# workarounds (:U, :z, userns keep-id) each trade one problem for another --
+# :U in particular chowns the host's data/ to a subuid, so you can no longer
+# delete it, which is the opposite of the point. Clearing data is what POST
+# /nuke is for; source files arrive through the browser, so the host's data/ is
+# not needed inside.
+volumes:
+  dwight-data:

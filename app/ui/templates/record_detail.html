@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% set nav_page = 'records' %}
+{% block title %}Record history · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>RECORD</b> · {{ record.status | upper | replace('_', ' ') if record else 'MISSING' }} )</div>
+    <h1>{{ record.natural_key if record and record.natural_key else record_id }}</h1>
+    <div class="when">
+      {% if record %}
+        {% if absorbed %}Absorbed {{ absorbed }} duplicate record{{ '' if absorbed == 1 else 's' }}.{% endif %}
+        {% if record.blocked_on %}Blocked on {{ record.blocked_on }}.{% endif %}
+      {% endif %}
+    </div>
+  </div>
+  <div class="actions">
+    <a class="btn btn-glass btn-sm" href="/runs/{{ run_id }}/audit.csv?entity_id={{ record_id }}">Export CSV</a>
+    <a class="btn btn-ghost btn-sm" href="/runs/{{ run_id }}/audit.json?entity_id={{ record_id }}">JSON</a>
+  </div>
+</div>
+
+{% if record %}
+<div class="cols-main">
+  <div class="stack">
+    <div class="card">
+      <header><h3>Timeline</h3><p>Every change, in order, with who made it.</p></header>
+      <div class="dtable">
+        <table>
+          <thead><tr><th>When</th><th>Who</th><th>Stage</th><th>Reason</th><th>Before</th><th>After</th><th>Note</th></tr></thead>
+          <tbody>
+            {% for e in timeline %}
+            <tr>
+              <td class="mono">{{ e.ts[:19] if e.ts else "" }}</td>
+              <td>
+                {% if e.actor == 'human' %}
+                <span class="pill pill-sky"><i class="dot"></i>human</span>
+                {% elif e.actor == 'llm' %}
+                <span class="pill pill-mint"><i class="dot"></i>model</span>
+                {% else %}
+                <span class="pill pill-mute"><i class="dot"></i>{{ e.actor }}</span>
+                {% endif %}
+              </td>
+              <td class="mono">{{ e.stage or "—" }}</td>
+              <td class="mono">{{ e.reason_code or "—" }}</td>
+              <td class="mono">{{ e.before if e.before is not none else "" }}</td>
+              <td class="mono">{{ e.after if e.after is not none else "" }}</td>
+              <td>{{ e.note or "" }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7">No audit events for this record.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <header><h3>Current values</h3><p>And which source each one survived from.</p></header>
+      <div class="dtable">
+        <table>
+          <thead><tr><th>Field</th><th>Value</th><th>From</th></tr></thead>
+          <tbody>
+            {% for field, value in data.items() %}
+            <tr>
+              <td class="mono">{{ field }}</td>
+              <td>{{ value if value is not none else "—" }}</td>
+              <td>
+                {% if survivorship.get(field) %}
+                  <span class="t-data">{{ survivorship[field].source }}</span>
+                  {% if survivorship[field].get('conflict') %}
+                  <span class="pill pill-amber"><i class="dot"></i>disagreed</span>
+                  {% endif %}
+                {% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="callout"><span aria-hidden="true">!</span><span><b>No such record.</b> <span>It is not part of this run.</span></span></div>
+</div>
+{% endif %}
+
+{% endblock %}

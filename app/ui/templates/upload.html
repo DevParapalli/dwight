@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% set nav_page = 'upload' %}
+{% block title %}Start an import · dwight{% endblock %}
+{% block topbar %}dwight · migration agent{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>IMPORT</b> · NEW )</div>
+    <h1>Bring the <em class="serif-em">people</em> across.</h1>
+    <div class="when">Upload every export you have. The agent takes it from there.</div>
+  </div>
+</div>
+
+<div class="cols-main">
+  <div class="stack">
+    <div class="card">
+      <form method="post" action="/" enctype="multipart/form-data">
+        <div class="field">
+          <label for="files">Source files</label>
+          <div class="file-picker" data-file-picker>
+            <label class="file-drop" for="files">
+              <span class="file-drop-icon" aria-hidden="true">+</span>
+              <span>
+                <strong>Drop source files here</strong>
+                <span class="file-drop-action">or choose them from your device</span>
+              </span>
+              <input id="files" name="files" type="file" multiple required accept=".csv,.xlsx">
+            </label>
+            <div class="file-list" data-file-list aria-live="polite"></div>
+          </div>
+          <span class="help">CSV or XLSX. Headers can disagree, dates can be written any way, and the same person may appear in more than one file.</span>
+        </div>
+        <button class="btn btn-primary" type="submit">Start import</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <div class="t-label">( WHAT HAPPENS NEXT )</div>
+      <p>The agent profiles every column, proposes a mapping, cleans and validates
+         each row, then merges the same person across files. It runs on its own.</p>
+      <p>It stops twice: for a column it cannot map confidently, and before writing
+         to the target system. Everything else becomes a question you can answer
+         later without holding up the batch.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var picker = document.querySelector('[data-file-picker]');
+    if (!picker) return;
+    var input = picker.querySelector('input[type="file"]');
+    var list = picker.querySelector('[data-file-list]');
+
+    function renderFiles() {
+      list.textContent = '';
+      Array.prototype.forEach.call(input.files, function (file) {
+        var item = document.createElement('span');
+        item.className = 'file-item';
+        item.textContent = file.name;
+        list.appendChild(item);
+      });
+      picker.classList.toggle('has-files', input.files.length > 0);
+    }
+
+    input.addEventListener('change', renderFiles);
+    picker.addEventListener('dragover', function (event) {
+      event.preventDefault();
+      picker.classList.add('is-dragging');
+    });
+    picker.addEventListener('dragleave', function () {
+      picker.classList.remove('is-dragging');
+    });
+    picker.addEventListener('drop', function (event) {
+      event.preventDefault();
+      picker.classList.remove('is-dragging');
+      input.files = event.dataTransfer.files;
+      renderFiles();
+    });
+  }());
+</script>
+
+{% endblock %}

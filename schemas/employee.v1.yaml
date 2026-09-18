@@ -1,0 +1,36 @@
+version: 1
+entity: employee
+natural_key: employee_id
+fields:
+  employee_id:        {type: string,  required: true,  pattern: "^[A-Za-z0-9-]{3,20}$"}
+  first_name:         {type: string,  required: true}
+  last_name:          {type: string,  required: true}
+  work_email:         {type: email,   required: true,  unique: true}
+  personal_email:     {type: email,   required: false}
+  phone:              {type: phone,   required: false, format: e164, default_region: IN}
+  date_of_birth:      {type: date,    required: false}
+  gender:             {type: enum,    required: false, values: [male, female, other, undisclosed]}
+  hire_date:          {type: date,    required: true,  material: true}
+  employment_status:  {type: enum,    required: true,  values: [active, on_leave, terminated], material: true}
+  employment_type:    {type: enum,    required: true,  values: [full_time, part_time, contract, intern]}
+  department:         {type: string,  required: true,  material: true}
+  designation:        {type: string,  required: true}
+  location:           {type: string,  required: false}
+  manager_employee_id: {type: string, required: false, references: employee_id, material: true}
+  cost_center:        {type: string,  required: false}
+  annual_ctc:         {type: decimal, required: false, material: true}
+  ctc_currency:       {type: enum,    required: false, values: [INR, USD, EUR], default: INR}
+  termination_date:   {type: date,    required: false}
+cross_field_rules:
+  - id: R1
+    rule: "termination_date >= hire_date"
+  - id: R2
+    rule: "employment_status == 'terminated' implies termination_date is not null"
+  - id: R3
+    rule: "employment_status != 'terminated' implies termination_date is null"
+  - id: R4
+    rule: "date_of_birth <= hire_date - 16 years"
+  - id: R5
+    rule: "manager_employee_id != employee_id"
+  - id: R6
+    rule: "manager_employee_id resolves to a known employee_id"

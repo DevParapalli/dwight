@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% set nav_page = 'mappings' %}
+{% block title %}Mapping · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>MAPPING</b> · {{ mappings | length }} COLUMNS )</div>
+    <h1>Which column means <em class="serif-em">what.</em></h1>
+    <div class="when">Confident columns are already accepted. Anything flagged is waiting in the queue, and the run continues on its own once it is answered.</div>
+  </div>
+  <div class="actions">
+    <form method="post" action="/runs/{{ run_id }}/mappings/accept-all">
+      <button class="btn btn-glass" type="submit">Accept all</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="dtable">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th><th>Column</th><th>Target field</th><th>Confidence</th>
+          <th>Why</th><th>Samples</th><th>Status</th><th>Override</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in mappings %}
+        <tr>
+          <td class="mono">{{ m.filename }}</td>
+          <td class="mono">{{ m.column_name }}</td>
+          <td>{{ m.target_field or "—" }}</td>
+          <td class="mono">{{ "%.2f"|format(m.confidence) if m.confidence is not none else "—" }}</td>
+          <td>{{ m.rationale }}</td>
+          <td class="mono">{{ m.sample_values[:3] | join(", ") }}</td>
+          <td>
+            {% if m.status == 'accepted' %}
+            <span class="pill pill-mint"><i class="dot"></i>Accepted</span>
+            {% else %}
+            <span class="pill pill-amber"><i class="dot"></i>Flagged</span>
+            {% endif %}
+          </td>
+          <td>
+            <form method="post" action="/runs/{{ run_id }}/mappings/{{ m.id }}/override" style="display:flex;gap:6px;align-items:center">
+              <label for="target-{{ m.id }}" class="visually-hidden">Target field for {{ m.column_name }}</label>
+              <span class="selwrap">
+                <select id="target-{{ m.id }}" name="target_field">
+                  <option value="">(none)</option>
+                  {% for field_name in target_fields %}
+                  <option value="{{ field_name }}" {% if field_name == m.target_field %}selected{% endif %}>{{ field_name }}</option>
+                  {% endfor %}
+                </select>
+              </span>
+              <button class="btn btn-ghost btn-sm" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

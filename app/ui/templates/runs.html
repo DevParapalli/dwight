@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% set nav_page = 'runs' %}
+{% block title %}Previous runs · dwight{% endblock %}
+{% block topbar %}<span class="t-data">{{ runs | length }} run{{ '' if runs | length == 1 else 's' }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>PREVIOUS RUNS</b> )</div>
+    <h1>Every import this instance has <em class="serif-em">done</em>.</h1>
+    <div class="when">Newest first. Times are Asia/Kolkata.</div>
+  </div>
+  {% if nuke_enabled %}
+  <div class="actions">
+    {# Testing-only, and only rendered when the flag that registers the route is
+       on, so the button can never be a dead end. #}
+    <form method="post" action="/nuke"
+          onsubmit="return confirm('Delete every run, record, question and audit event, in this app and in the target system? This cannot be undone.')">
+      <button class="btn btn-ghost btn-sm" type="submit">Nuke all data</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="dtable">
+    <table>
+      <thead>
+        <tr><th>Started</th><th>Sources</th><th>Records</th><th>Open questions</th><th>Pushed</th><th>Stage</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+        <tr>
+          <td>{{ run.created_at | local_time }}</td>
+          <td>{{ run.sources or '—' }}</td>
+          <td class="mono">{{ "{:,}".format(run.record_count) }}</td>
+          <td>
+            {% if run.open_questions %}
+            <span class="pill pill-amber"><i class="dot"></i>{{ run.open_questions }}</span>
+            {% else %}
+            <span class="pill pill-mint"><i class="dot"></i>none</span>
+            {% endif %}
+          </td>
+          <td class="mono">{{ "{:,}".format(run.pushed) }}</td>
+          <td><span class="pill pill-mute"><i class="dot"></i>{{ run.stage }}</span></td>
+          <td><a class="btn btn-glass btn-sm" href="/runs/{{ run.id }}">Open</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7">No runs yet. <a href="/">Start one</a>.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

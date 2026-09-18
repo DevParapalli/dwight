@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% set nav_page = 'push' %}
+{% block title %}Push · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>PUSH</b> · {{ stage | upper }} )</div>
+    <h1>Writing to the <em class="serif-em">target.</em></h1>
+    <div class="when" aria-live="polite">
+      {{ "{:,}".format(succeeded) }} accepted, {{ "{:,}".format(rejected) }} refused outright
+      ({{ failure_rate }}% deterministic). {{ "{:,}".format(retried) }} attempt{{ '' if retried == 1 else 's' }} were retries after a transient failure.
+    </div>
+  </div>
+  <div class="actions">
+    <form method="post" action="/runs/{{ run_id }}/push">
+      <button class="btn btn-primary" type="submit">Push reconciled employees</button>
+    </form>
+  </div>
+</div>
+
+<div class="mosaic">
+  <div class="kpi m-4">
+    <div class="k-label">( ACCEPTED )</div>
+    <div class="k-val">{{ "{:,}".format(succeeded) }}</div>
+    <div class="k-foot"><span>employees in the target</span></div>
+  </div>
+  <div class="kpi m-4">
+    <div class="k-label">( REFUSED )</div>
+    <div class="k-val">{{ "{:,}".format(rejected) }}</div>
+    <div class="k-foot"><span>a rule the agent cannot know</span></div>
+  </div>
+  <div class="kpi m-4">
+    <div class="k-label">( RETRIES )</div>
+    <div class="k-val">{{ "{:,}".format(retried) }}</div>
+    <div class="k-foot"><span>transient failures absorbed</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <header><h3>Attempts by status</h3><p>Every request the agent made, including the ones it retried through.</p></header>
+  <div class="dtable">
+    <table>
+      <thead><tr><th>Status</th><th>Meaning</th><th>Attempts</th></tr></thead>
+      <tbody>
+        {% for row in by_status %}
+        <tr>
+          <td>
+            {% if row.status_code == 200 %}
+            <span class="pill pill-mint"><i class="dot"></i>200</span>
+            {% elif row.status_code in (500, 502, 503, 504, 429) %}
+            <span class="pill pill-amber"><i class="dot"></i>{{ row.status_code }}</span>
+            {% else %}
+            <span class="pill pill-rose"><i class="dot"></i>{{ row.status_code }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if row.status_code == 200 %}accepted
+            {% elif row.status_code == 429 %}rate limited, retried
+            {% elif row.status_code >= 500 %}transient, retried
+            {% else %}refused, not retryable{% endif %}
+          </td>
+          <td class="mono">{{ "{:,}".format(row.n) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">Nothing pushed yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if offer_rollback %}
+<div class="card">
+  <header><h3>Rollback</h3></header>
+  <div class="callout"><span aria-hidden="true">!</span><span>
+    <b>{{ failure_rate }}% of records were refused outright.</b>
+    <span>That is above the {{ rollback_threshold }}% threshold in <code>policy/escalation.yaml</code>.
+    Rolling back deletes every employee this run pushed, from the target itself.</span>
+  </span></div>
+  <form method="post" action="/runs/{{ run_id }}/rollback" style="margin-top:14px">
+    <button class="btn btn-danger" type="submit">Roll back this run</button>
+  </form>
+</div>
+{% endif %}
+
+{% endblock %}

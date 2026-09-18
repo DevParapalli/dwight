@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% set nav_page = 'records' %}
+{% block title %}Records · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>RECORDS</b> )</div>
+    <h1>Every person, and what happened to them.</h1>
+    <div class="when">Showing up to 100. Open any row for its full history.</div>
+  </div>
+  <div class="actions">
+    <form method="get" action="/runs/{{ run_id }}/records">
+      <label class="input">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input name="q" type="search" value="{{ q }}" placeholder="Employee id, name, any field">
+      </label>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="dtable">
+    <table>
+      <thead>
+        <tr><th>Identifier</th><th>Name</th><th>Source</th><th>Department</th><th>Status</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for r in records %}
+        <tr>
+          <td class="mono">
+            {{ r.identifier }}
+            {% if not r.natural_key %}<span class="chip-f">by {{ r.identified_by }}</span>{% endif %}
+          </td>
+          <td>{{ r.name }}</td>
+          <td class="mono">{{ r.source }}</td>
+          <td>{{ r.department }}</td>
+          <td>
+            {% if r.status == 'blocked' %}
+            <span class="pill pill-rose"><i class="dot"></i>Blocked</span>
+            {% elif r.status == 'merged_survivor' %}
+            <span class="pill pill-sky"><i class="dot"></i>Survivor</span>
+            {% elif r.status == 'merged' %}
+            <span class="pill pill-mute"><i class="dot"></i>Merged</span>
+            {% elif r.status == 'incomplete' %}
+            <span class="pill pill-amber"><i class="dot"></i>Incomplete</span>
+            {% else %}
+            <span class="pill pill-mint"><i class="dot"></i>Clean</span>
+            {% endif %}
+          </td>
+          <td><a class="btn btn-glass btn-sm" href="/runs/{{ run_id }}/records/{{ r.id }}">Open history</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">No records match.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

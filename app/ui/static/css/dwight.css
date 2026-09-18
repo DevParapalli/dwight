@@ -1,0 +1,88 @@
+/* App-level classes that are not part of Proxima. Proxima's own stylesheet
+   stays untouched so it can be resynced from the design system; everything here
+   is built from its tokens. */
+
+/* -- affected-record accordion on a question card ----------- */
+.xdetails { border-top: 1px solid var(--hairline-soft); margin-bottom: 12px; }
+.xdetails > summary {
+  font: 490 12.5px var(--font-ui); color: var(--ink-mid);
+  padding: 10px 0; cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: 8px;
+}
+.xdetails > summary::-webkit-details-marker { display: none; }
+.xdetails > summary::before {
+  content: ''; width: 6px; height: 6px; flex: none;
+  border-right: 1.6px solid var(--ink-low); border-bottom: 1.6px solid var(--ink-low);
+  transform: rotate(-45deg); transition: transform .18s;
+}
+.xdetails[open] > summary::before { transform: rotate(45deg); }
+.xdetails > summary:hover { color: var(--ink-hi); }
+.xdetails > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+.xdetails-body { display: grid; gap: 10px; padding: 2px 0 12px; }
+.xrecord { border: 1px solid var(--hairline); border-radius: 10px; background: var(--glass-1); padding: 12px 14px; }
+.xrecord-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+
+.xfields { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 18px; margin: 0; }
+.xfields > div { min-width: 0; }
+.xfields dt { font: 500 10.5px var(--font-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-low); }
+.xfields dd { margin: 1px 0 0; font-size: 13px; color: var(--ink-hi); overflow-wrap: anywhere; }
+
+/* -- skeletons --------------------------------------------- */
+/* Shown until the first frame arrives, so a page opens at its final shape
+   instead of grafting on a card at a time. */
+.skel { background: var(--glass-2); border-radius: 6px; position: relative; overflow: hidden; }
+.skel::after {
+  content: ''; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--glass-2), transparent);
+  animation: skel-sweep 1.4s infinite;
+}
+@keyframes skel-sweep { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) {
+  .skel::after { animation: none; }
+}
+.skel-line { height: 11px; margin: 7px 0; }
+.skel-line.w-40 { width: 40%; } .skel-line.w-60 { width: 60%; }
+.skel-line.w-75 { width: 75%; } .skel-line.w-90 { width: 90%; }
+.skel-row { display: flex; gap: 10px; align-items: center; padding: 13px 4px; border-top: 1px solid var(--hairline-soft); }
+.skel-chip { height: 20px; width: 74px; border-radius: var(--r-full); flex: none; }
+.skel-kpi { height: 58px; border-radius: 12px; }
+
+/* -- overview spacing -------------------------------------- */
+/* The KPI callouts and the open-questions table were butting together. */
+.stack-lg { display: grid; gap: 22px; }
+.run-footnote { text-align: center; color: var(--ink-low); font-size: 12.5px; padding: 18px 4px 4px; }
+
+/* The KPI mosaic and the cards below it were sitting flush against each other;
+   Proxima's .mosaic sets its own internal gap but no trailing margin. */
+.mosaic + .cols-main,
+.mosaic + .card,
+.mosaic + .stack { margin-top: 22px; }
+
+/* The caption under each KPI figure reads as a label for the tile, so it sits
+   under the middle of it rather than ragged left. */
+.kpi .k-foot { justify-content: center; text-align: center; }
+
+/* -- source file picker ------------------------------------ */
+.file-picker { display: grid; gap: 10px; }
+.file-drop {
+  min-height: 112px; border: 1px dashed var(--hairline); border-radius: 10px;
+  padding: 20px; display: flex; align-items: center; gap: 14px; cursor: pointer;
+  color: var(--ink-mid); transition: border-color .18s, background .18s;
+}
+.file-drop:hover, .file-picker.is-dragging .file-drop,
+.file-drop:focus-within { border-color: var(--accent); background: var(--glass-1); }
+.file-drop-icon {
+  width: 34px; height: 34px; border: 1px solid var(--hairline); border-radius: 50%;
+  display: grid; place-items: center; flex: none; font-size: 22px; font-weight: 300;
+  color: var(--accent);
+}
+.file-drop strong, .file-drop-action { display: block; }
+.file-drop strong { color: var(--ink-hi); font-size: 13px; }
+.file-drop-action { margin-top: 3px; font-size: 12px; color: var(--ink-low); }
+.file-drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.file-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.file-item {
+  max-width: 100%; overflow-wrap: anywhere; padding: 5px 9px; border-radius: 5px;
+  background: var(--glass-2); color: var(--ink-mid); font: 11px var(--font-mono);
+}

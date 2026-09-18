@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% set nav_page = 'queue' %}
+{% block title %}Questions · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+{% set total = groups.values() | map(attribute='total') | sum %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>QUESTIONS</b> · {{ groups | length }} KINDS )</div>
+    <h1>{{ total }} thing{{ '' if total == 1 else 's' }} the agent <em class="serif-em">won't</em> decide.</h1>
+    <div class="when" aria-live="polite">{{ resolved_count }} already answered. Answering one can close every similar case at once.</div>
+  </div>
+</div>
+
+{% for reason_code, group in groups.items() %}
+<section class="card">
+  <header>
+    <h3>{{ reason_code | replace('_', ' ') | title }}</h3>
+    <p>{{ group.total }} question{{ '' if group.total == 1 else 's' }}, {{ "{:,}".format(group.rows_affected) }} row{{ '' if group.rows_affected == 1 else 's' }} affected.</p>
+  </header>
+
+  {% for card in group.cards %}
+  <article class="xrow" style="display:block">
+    <div style="padding:14px 4px">
+      <p style="color:var(--ink-hi);font-size:15px;margin:0 0 10px">{{ card.question }}</p>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+        <span class="pill pill-mute"><i class="dot"></i>{{ card.reason_code }}</span>
+        <span class="chip-f">{{ card.rows_affected }} row{{ '' if card.rows_affected == 1 else 's' }}</span>
+        {% if card.similar_count > 1 %}<span class="chip-f">{{ card.similar_count }} similar</span>{% endif %}
+        <span class="chip-f">{{ card.scope }}-scoped</span>
+      </div>
+
+      <div style="margin-bottom:12px">
+        <div class="t-label">( WHY THIS WAS ASKED )</div>
+        <div class="t-data">{{ card.evidence }}</div>
+      </div>
+
+      {# A question about a specific row cannot be answered without seeing the
+         row. Collapsed by default so the queue still scans quickly. #}
+      {% if card.examples %}
+      <details class="xdetails">
+        <summary>
+          Show the {{ card.examples | length }} affected record{{ '' if card.examples | length == 1 else 's' }}{% if card.rows_affected > card.examples | length %} of {{ "{:,}".format(card.rows_affected) }}{% endif %}
+        </summary>
+        <div class="xdetails-body">
+          {% for example in card.examples %}
+          <div class="xrecord">
+            <div class="xrecord-head">
+              <span class="mono">{{ example.natural_key or example.id }}</span>
+              <span class="chip-f">{{ example.filename }}</span>
+            </div>
+            <dl class="xfields">
+              {% for field_name, field_value in example.fields %}
+              <div>
+                <dt>{{ field_name | replace('_', ' ') }}</dt>
+                <dd class="mono">{{ field_value }}</dd>
+              </div>
+              {% endfor %}
+            </dl>
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% endif %}
+
+      {# The proposal itself, stated before the buttons. Approving something you
+         cannot see is not a decision, it is a guess -- and where the agent has
+         nothing to propose, it says so rather than offering a hollow approve. #}
+      <div class="callout" style="margin-bottom:12px">
+        {% if card.suggested_value %}
+        <span aria-hidden="true">→</span>
+        <span>
+          <b>If you approve:</b>
+          <span>{{ card.suggested_action }} — <code>{{ card.suggested_value }}</code>.</span>
+        </span>
+        {% else %}
+        <span aria-hidden="true">?</span>
+        <span>
+          <b>The agent has no proposal here.</b>
+          <span>{{ card.suggested_action | capitalize }}. There is nothing to approve, so choose a value and save, or reject.</span>
+        </span>
+        {% endif %}
+      </div>
+
+      <form method="post" action="/runs/{{ run_id }}/escalations/{{ card.id }}/resolve">
+        <div class="field">
+          <label for="value-{{ card.id }}">Refine before saving</label>
+          {% if card.reason_code in ("MAP_AMBIGUOUS", "MAP_UNMAPPED") %}
+          <span class="selwrap">
+            <select id="value-{{ card.id }}" name="value">
+              <option value="" {% if not card.suggested_value %}selected{% endif %}>(leave unmapped)</option>
+              {% for field_name in target_fields %}
+              <option value="{{ field_name }}" {% if field_name == card.suggested_value %}selected{% endif %}>
+                {{ field_name }}{% if field_name == card.suggested_value %} — proposed{% elif field_name in card.options %} — also possible{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+          </span>
+          {% elif card.options %}
+          <span class="selwrap">
+            <select id="value-{{ card.id }}" name="value">
+              {% for option in card.options %}
+              <option value="{{ option }}" {% if option == card.suggested_value %}selected{% endif %}>
+                {{ option | replace('_', ' ') }}{% if option == card.suggested_value %} — proposed{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+          </span>
+          {% else %}
+          <input id="value-{{ card.id }}" name="value" type="text"
+                 value="{{ card.suggested_value or '' }}"
+                 placeholder="{{ card.suggested_action }}">
+          {% endif %}
+          <span class="help">Pre-filled with what the agent proposed. Change it and use Save edit, or approve it as-is.</span>
+        </div>
+
+        {% if card.similar_count > 1 %}
+        <div class="setrow">
+          <div class="info">
+            <b>Apply to all {{ card.similar_count }} similar</b>
+            <span>Same question, same answer, closed together.</span>
+          </div>
+          <div class="ctl">
+            <input id="all-{{ card.id }}" name="apply_to_all" type="checkbox" value="1">
+            <label for="all-{{ card.id }}" class="help">apply to all</label>
+          </div>
+        </div>
+        {% endif %}
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          {% if card.suggested_value %}
+          <button class="btn btn-primary btn-sm" type="submit" name="action" value="approve">
+            Approve: {{ card.suggested_value }}
+          </button>
+          <button class="btn btn-glass btn-sm" type="submit" name="action" value="edit">Save my change</button>
+          {% else %}
+          <button class="btn btn-primary btn-sm" type="submit" name="action" value="edit">Save my choice</button>
+          {% endif %}
+          <button class="btn btn-ghost btn-sm" type="submit" name="action" value="reject">Reject</button>
+        </div>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+
+  {% if group.total > cards_per_code %}
+  <p class="t-data">Showing the first {{ cards_per_code }} of {{ group.total }}. Answer these to see more.</p>
+  {% endif %}
+</section>
+{% else %}
+<div class="card">
+  <div class="callout"><span aria-hidden="true">✓</span><span><b>Nothing to review.</b> <span>Every question in this run is answered.</span></span></div>
+</div>
+{% endfor %}
+
+{% endblock %}
