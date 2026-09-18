@@ -43,9 +43,26 @@ CREATE TABLE IF NOT EXISTS target_employees (
 );
 """
 
-# A rule the agent cannot know up front: these source systems legitimately emit
-# CC-600, and this target simply does not accept it.
+# Rules the agent cannot know up front. Each one is something a real vendor
+# system enforces and no source file announces, which is the whole point of
+# PUSH_REJECTED: the agent finds out by being told no.
+#
+# Every message names what the target WILL accept. A refusal that says only
+# "invalid" leaves the consultant, and the agent, with nothing to act on.
 ALLOWED_COST_CENTERS = {"CC-100", "CC-200", "CC-300", "CC-400", "CC-500"}
+
+# This API onboards permanent and contract staff. Interns go through a separate
+# campus system, so the source systems' own "intern" is refused here.
+ALLOWED_EMPLOYMENT_TYPES = {"full_time", "part_time", "contract"}
+
+# The target keeps its own job-title catalogue and will not invent a new one on
+# an employee's say-so, so a misspelled title is refused rather than absorbed.
+ALLOWED_DESIGNATIONS = {
+    "Software Engineer", "Senior Software Engineer", "Engineering Manager",
+    "Data Analyst", "Business Analyst", "Sales Executive", "Account Manager",
+    "HR Specialist", "Finance Analyst", "Operations Manager",
+    "Customer Support Associate", "Legal Counsel", "Marketing Specialist", "Director",
+}
 
 state = {
     "db": Path("data/mock_target.db"),
@@ -103,7 +120,27 @@ async def upsert_employee(
     cost_center = payload.get("cost_center")
     if cost_center and cost_center not in ALLOWED_COST_CENTERS:
         response.status_code = 422
-        return {"error": f"cost_center {cost_center!r} is not an accepted cost centre"}
+        return {"error": (f"cost_center {cost_center!r} is not an accepted cost centre; "
+                          f"accepted values are {', '.join(sorted(ALLOWED_COST_CENTERS))}")}
+
+    employment_type = payload.get("employment_type")
+    if employment_type and employment_type not in ALLOWED_EMPLOYMENT_TYPES:
+        response.status_code = 422
+        return {"error": (f"employment_type {employment_type!r} is not onboarded through this "
+                          f"API; accepted values are {', '.join(sorted(ALLOWED_EMPLOYMENT_TYPES))}")}
+
+    designation = payload.get("designation")
+    if designation and designation not in ALLOWED_DESIGNATIONS:
+        response.status_code = 422
+        return {"error": (f"designation {designation!r} is not in the job-title catalogue; "
+                          f"accepted values are {', '.join(sorted(ALLOWED_DESIGNATIONS))}")}
+
+    # Deliberately a rule nothing can satisfy automatically: a date of birth
+    # cannot be derived from any other field, so this is the case where the
+    # right answer is to stop and ask a person.
+    if not payload.get("date_of_birth"):
+        response.status_code = 422
+        return {"error": "date_of_birth is required for identity verification and is missing"}
 
     now = _now()
     with _connect() as conn:

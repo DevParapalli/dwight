@@ -44,10 +44,28 @@ def connect():
         conn.close()
 
 
+# Columns added after a database may already exist. CREATE TABLE IF NOT EXISTS
+# will not add a column to a table that is already there, so without this an
+# existing database keeps working right up until something reads the new column.
+# This is not a migration system and is not trying to be one; it only adds
+# columns, never removes or rewrites them.
+_ADDED_COLUMNS = (
+    ("escalations", "context", "TEXT"),
+)
+
+
+def _add_missing_columns(conn) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db() -> None:
     ddl = _DDL_PATH.read_text()
     with connect() as conn:
         conn.executescript(ddl)
+        _add_missing_columns(conn)
 
 
 def _ddl_table_names() -> list[str]:
@@ -56,7 +74,15 @@ def _ddl_table_names() -> list[str]:
     return re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _DDL_PATH.read_text())
 
 
-def truncate_all() -> dict[str, int]:
+# Derived data that survives a reset. llm_cache is not run data: it is keyed by
+# (model, prompt_hash), so it can never go stale -- a changed prompt is simply a
+# different key -- and rebuilding it means paying for every model call again.
+# Wiping it on a "clear the test data" action made each re-run slower for no
+# benefit, which is the opposite of what the action is for.
+_PRESERVED_ON_TRUNCATE = {"llm_cache"}
+
+
+def truncate_all(include_cache: bool = False) -> dict[str, int]:
     """Empties every table this application owns. Returns rows deleted per table.
 
     Testing-only escape hatch behind settings.enable_nuke -- see the /nuke route.
@@ -73,10 +99,13 @@ def truncate_all() -> dict[str, int]:
     in any order. That setting is per-connection and this one is closed on the
     way out, so nothing leaks to the rest of the application.
     """
+    preserved = set() if include_cache else _PRESERVED_ON_TRUNCATE
     deleted: dict[str, int] = {}
     with connect() as conn:
         conn.execute("PRAGMA foreign_keys=OFF")
         for table in _ddl_table_names():
+            if table in preserved:
+                continue
             deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
         conn.execute("DELETE FROM sqlite_sequence")
     return {t: n for t, n in deleted.items() if n}

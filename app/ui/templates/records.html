@@ -20,7 +20,22 @@
   </div>
 </div>
 
+{# Every status spelled out, once, above the table. The pills are short enough
+   to scan and too short to explain themselves. #}
 <div class="card">
+  <details class="xdetails">
+    <summary>What these statuses mean</summary>
+    <div class="xdetails-body">
+      <dl class="xoutcomes">
+        <div><dt>Clean</dt><dd>Ready to send to the target system.</dd></div>
+        <div><dt>Survivor</dt><dd>One person, built by combining records that matched across your files.</dd></div>
+        <div><dt>Merged</dt><dd>Folded into a survivor above. Kept for the audit trail, not sent separately.</dd></div>
+        <div><dt>Incomplete</dt><dd>Missing something the target system requires, so it is not sent.</dd></div>
+        <div><dt>Blocked</dt><dd>Waiting on a question in the queue before it can go anywhere.</dd></div>
+        <div><dt>Not sent</dt><dd>The target system refused it and the correction was rejected, so it is deliberately left out of the push.</dd></div>
+      </dl>
+    </div>
+  </details>
   <div class="dtable">
     <table>
       <thead>
@@ -37,7 +52,9 @@
           <td class="mono">{{ r.source }}</td>
           <td>{{ r.department }}</td>
           <td>
-            {% if r.status == 'blocked' %}
+            {% if r.status == 'excluded' %}
+            <span class="pill pill-rose"><i class="dot"></i>Not sent</span>
+            {% elif r.status == 'blocked' %}
             <span class="pill pill-rose"><i class="dot"></i>Blocked</span>
             {% elif r.status == 'merged_survivor' %}
             <span class="pill pill-sky"><i class="dot"></i>Survivor</span>

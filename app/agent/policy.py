@@ -2,6 +2,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from datetime import date
 
 import yaml
 
@@ -86,6 +87,9 @@ class PolicyDecision:
     # rather than retype it.
     suggested_value: str | None = None
     options: list[str] = dc_field(default_factory=list)
+    # Machine-readable detail a later step needs, kept apart from `evidence`,
+    # which is prose for a person to read.
+    context: dict = dc_field(default_factory=dict)
 
 
 @dataclass
@@ -137,7 +141,8 @@ def decide_mapping(
 
 
 def decide_enum_coercion(field_name: str, raw_value: str, edit_distance: int, policy: dict,
-                         nearest: str | None = None) -> PolicyDecision:
+                         nearest: str | None = None,
+                         allowed_values: list[str] | None = None) -> PolicyDecision:
     cfg = policy["values"]
     if edit_distance <= cfg["enum_auto_max_edit_distance"]:
         return PolicyDecision(None)
@@ -149,11 +154,15 @@ def decide_enum_coercion(field_name: str, raw_value: str, edit_distance: int, po
         evidence=f"nearest allowed value is {edit_distance} edits away",
         suggested_action=(f"read it as {nearest}" if nearest else "pick the correct value"),
         suggested_value=nearest,
+        # The whole allowed set, so the card offers a list to choose from rather
+        # than a free-text box and a hint about the nearest one.
+        options=list(allowed_values or []),
     )
 
 
 def decide_llm_normalization(field_name: str, raw_value: str, confidence: float, policy: dict,
-                            proposed: str | None = None) -> PolicyDecision:
+                            proposed: str | None = None,
+                            allowed_values: list[str] | None = None) -> PolicyDecision:
     cfg = policy["values"]
     if confidence >= cfg["auto_accept_min_confidence"]:
         return PolicyDecision(None)
@@ -165,17 +174,43 @@ def decide_llm_normalization(field_name: str, raw_value: str, confidence: float,
         evidence=f"normalizer confidence {confidence:.2f}",
         suggested_action=(f"read it as {proposed}" if proposed else "set the correct value"),
         suggested_value=proposed,
+        options=list(allowed_values or []),
     )
 
 
-def decide_date(field_name: str, filename: str, ambiguous: bool, policy: dict) -> PolicyDecision:
+def _date_readings(raw_value: str) -> tuple[str, str] | None:
+    """The two calendar dates a slash date could mean, as words."""
+    match = re.match(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$", str(raw_value or ""))
+    if not match:
+        return None
+    a, b, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    try:
+        return (date(year, b, a).strftime("%-d %B %Y"),
+                date(year, a, b).strftime("%-d %B %Y"))
+    except ValueError:
+        return None
+
+
+def decide_date(field_name: str, filename: str, ambiguous: bool, policy: dict,
+                raw_value: str = "") -> PolicyDecision:
     if not ambiguous or not policy["dates"]["escalate_when_multiple_formats_parse_to_different_dates"]:
         return PolicyDecision(None)
     scope_key = f"{filename}:{field_name}"
+
+    # Both readings, spelled out. "Two valid calendar dates are possible" is true
+    # and useless: nobody can choose day-first over month-first without seeing
+    # that 03/04/2024 is either the 3rd of April or the 4th of March.
+    readings = _date_readings(raw_value)
+    evidence = "two valid calendar dates are possible for the same value"
+    if readings:
+        day_first, month_first = readings
+        evidence = (f"{raw_value} reads as {day_first} if the day comes first, "
+                    f"or {month_first} if the month does")
+
     return PolicyDecision(
         "DATE_FORMAT_AMBIGUOUS", scope_key,
         question=f"Some dates in {field_name!r} ({filename}) could be read two different ways (day/month order).",
-        evidence="two valid calendar dates are possible for the same value",
+        evidence=evidence,
         suggested_action="read this column as day-first (DD/MM)",
         suggested_value="day_first",
         options=["day_first", "month_first"],
@@ -200,6 +235,11 @@ def decide_logic_contradiction(rule_id: str, field_name: str, policy: dict) -> P
         question=f"This record has a problem with no safe automatic fix: {description}.",
         evidence=f"cross-field rule {rule_id}: {description}",
         suggested_action="review and correct the record by hand",
+        # The rule names the field it is about, which is what lets these be
+        # corrected row by row. Each record breaks the rule with its own values,
+        # so there is no single answer to give -- the same reason a refused
+        # column of values cannot be fixed from one text box.
+        context={"repair_field": field_name, "rule_id": rule_id},
     )
 
 
@@ -221,20 +261,44 @@ def dupe_scope_key(identity_a: str, identity_b: str) -> str:
     return f"{left}|{right}"
 
 
-def decide_dupe_ambiguous(identity_a: str, identity_b: str, score: float, policy: dict) -> PolicyDecision:
+def decide_dupe_ambiguous(identity_a: str, identity_b: str, score: float, policy: dict,
+                          judgement: dict | None = None) -> PolicyDecision:
     """Below the escalate band: not a duplicate, no action. Above auto_merge_above:
-    the caller merges automatically, no escalation. Only the band in between asks."""
+    the caller merges automatically, no escalation. Only the band in between asks.
+
+    A model judgement, when one is supplied, can close the pair without asking --
+    but in one direction only. It may conclude the two are different people,
+    which leaves both records exactly as they are. It can never conclude they are
+    the same, because that would merge two employees on a model's say-so and a
+    merge cannot be undone. The asymmetry is the point: the automatic path is the
+    one where being wrong changes nothing.
+    """
     # The band's own bounds decide this, not auto_merge_above. They hold the
     # same value today, but reading the merge threshold here would silently drop
     # every pair between the two the moment someone tuned them apart.
     lo, hi = policy["dedupe"]["escalate_band"]
     if score < lo or score >= hi:
         return PolicyDecision(None)
+
+    cfg = policy["dedupe"]
+    if (judgement
+            and judgement.get("verdict") == "different"
+            and judgement.get("confidence", 0.0) >= cfg["llm_auto_separate_min_confidence"]):
+        return PolicyDecision(None)
+
     scope_key = dupe_scope_key(identity_a, identity_b)
+    evidence = (f"similarity score {score:.2f}, inside the {lo}-{hi} band "
+                "where nothing is merged automatically")
+    if judgement and judgement.get("rationale"):
+        # The model looked and could not separate them either. Saying so is more
+        # useful to the reader than a bare score, and it is presented as a second
+        # opinion rather than an answer.
+        evidence += f". The AI reviewed both records and was not confident either: {judgement['rationale']}"
+
     return PolicyDecision(
         "DUPE_AMBIGUOUS", scope_key,
         question="Two records look like they might be the same person, but it isn't certain.",
-        evidence=f"similarity score {score:.2f}, inside the {lo}-{hi} band where nothing is merged automatically",
+        evidence=evidence,
         suggested_action="keep them separate unless you recognise them as one person",
         suggested_value="keep_separate",
         options=["merge", "keep_separate"],
@@ -265,6 +329,8 @@ def decide_push(employee_id: str, status_code: int, attempts: int, policy: dict,
         question=f"The target system refuses these employees and won't accept a retry{detail}.",
         evidence=f"HTTP {status_code} after {attempts} attempt(s); first seen on {employee_id}",
         suggested_action="correct the records to satisfy the target's rule, or skip them",
+        context={"status_code": status_code, "target_error": target_error,
+                 "normalised_reason": reason},
     )
 
 

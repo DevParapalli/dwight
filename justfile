@@ -6,8 +6,10 @@ install:
 dev:
     uv run uvicorn app.main:app --reload
 
+# --enable-nuke matches compose.yaml: POST /nuke empties this store between
+# takes. Testing convenience, and the route does not exist without the flag.
 target:
-    uv run tools/mock_target_api.py --port 8900
+    uv run tools/mock_target_api.py --port 8900 --enable-nuke
 
 samples rows="5000":
     uv run tools/generate_sources.py --rows {{rows}} --out data/samples

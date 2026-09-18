@@ -86,3 +86,101 @@
   max-width: 100%; overflow-wrap: anywhere; padding: 5px 9px; border-radius: 5px;
   background: var(--glass-2); color: var(--ink-mid); font: 11px var(--font-mono);
 }
+
+/* -- live activity feed (shared by the overview and the push page) --------- */
+/* Height-capped so a long run cannot push the rest of the page off-screen,
+   and newest-first so the thing worth reading is at the top and the list never
+   scrolls away from you while the agent works. */
+.activity { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+.act { display: flex; align-items: baseline; gap: 10px; padding: 7px 2px;
+       border-bottom: 1px solid var(--hairline-soft); }
+.act:last-child { border-bottom: 0; }
+.act-time { font-family: var(--font-mono); font-size: 11px; color: var(--ink-low);
+            flex: 0 0 auto; min-width: 64px; }
+.act-dot { width: 5px; height: 5px; border-radius: var(--r-full); flex: 0 0 auto;
+           background: var(--ink-low); }
+.act-stage .act-dot { background: var(--accent); }
+.act-escalation .act-dot { background: var(--amber); }
+.act-waiting .act-dot { background: var(--amber); }
+.act-failed .act-dot { background: var(--rose); }
+.act-finished .act-dot { background: var(--mint); }
+.act-msg { color: var(--ink-mid); font-size: 13.5px; flex: 1 1 auto; }
+.act-stage .act-msg { color: var(--ink-hi); }
+/* New rows arrive at the top, so they settle downward into place. */
+.act-new { animation: actin .25s ease-out; }
+@keyframes actin { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .act-new { animation: none; } }
+
+/* -- duplicate comparison ---------------------------------- */
+/* "Are these the same person" is unanswerable without seeing both records, so
+   the pair is shown as one table and the differing rows are marked. */
+.xcompare { overflow-x: auto; }
+.xcompare table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.xcompare thead th { text-align: left; font: 500 10.5px var(--font-mono);
+  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-low);
+  padding: 0 12px 8px 0; border-bottom: 1px solid var(--hairline); vertical-align: bottom; }
+.xcompare tbody th { text-align: left; font: 500 12px var(--font-ui); color: var(--ink-low);
+  padding: 7px 12px 7px 0; white-space: nowrap; }
+.xcompare tbody td { padding: 7px 12px 7px 0; color: var(--ink-mid); overflow-wrap: anywhere; }
+.xcompare tbody tr { border-bottom: 1px solid var(--hairline-soft); }
+.xcompare tbody tr:last-child { border-bottom: 0; }
+/* Marked with a colour AND a left rule, so the difference is not carried by
+   colour alone. */
+.xcompare tbody tr.xdiff th { color: var(--amber); }
+.xcompare tbody tr.xdiff td { color: var(--ink-hi); background: var(--amber-fill);
+  box-shadow: inset 2px 0 0 var(--amber-line); }
+
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* -- what each answer will do ------------------------------ */
+/* Spelled out next to the buttons: a consultant should not have to infer the
+   consequence of "Reject" from the word alone. */
+.xoutcomes { display: grid; gap: 6px; margin: 0 0 4px; padding: 11px 13px;
+  border: 1px solid var(--hairline); border-radius: 10px; background: var(--glass-1); }
+.xoutcomes > div { display: flex; gap: 10px; align-items: baseline; }
+.xoutcomes dt { flex: 0 0 96px; font: 500 11px var(--font-mono); letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-low); }
+.xoutcomes dd { margin: 0; font-size: 13px; color: var(--ink-mid); }
+
+/* Model calls and retry waits are the two things you most want to tell apart
+   from ordinary progress at a glance, so each gets its own dot colour and the
+   model lines are tinted. */
+.act-llm .act-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.act-llm .act-msg { color: var(--ink-hi); }
+.act-retry .act-dot { background: var(--amber); }
+.act-retry .act-msg { color: var(--amber); }
+
+/* A model dropping out and a model call failing are both things you want to
+   spot without reading — rose for a failure, amber with a left rule for a
+   switch, so neither is carried by colour alone. */
+.act-llm_failed .act-dot { background: var(--rose); box-shadow: 0 0 0 3px var(--rose-fill); }
+.act-llm_failed .act-msg { color: var(--rose); font-weight: 500; }
+.act-llm_switch .act-dot { background: var(--amber); }
+.act-llm_switch .act-msg { color: var(--amber); font-weight: 500; }
+.act-llm_failed, .act-llm_switch { box-shadow: inset 2px 0 0 currentColor; padding-left: 8px; }
+.act-llm_failed { color: var(--rose); }
+.act-llm_switch { color: var(--amber); }
+
+/* -- design system credit, top bar ------------------------- */
+/* Quiet by default and legible on hover: it is attribution, not navigation, so
+   it should not compete with the live indicator beside it. */
+.credit { font-family: var(--font-mono); font-size: 11px; letter-spacing: .04em;
+  color: var(--ink-low); text-decoration: none; white-space: nowrap; }
+.credit span { color: var(--ink-mid); border-bottom: 1px solid var(--hairline); padding-bottom: 1px; }
+.credit:hover { color: var(--ink-mid); }
+.credit:hover span { color: var(--accent); border-bottom-color: var(--accent); }
+.credit:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+/* On a narrow screen the status indicator matters more than the credit. */
+@media (max-width: 720px) { .credit { display: none; } }
+
+/* The value the target refused, shown beside its replacement. Struck through so
+   "what it was" and "what it will be" are distinguishable without reading the
+   column headers. */
+.dtable td.was { color: var(--ink-low); text-decoration: line-through; text-decoration-thickness: 1px; }
+
+/* Sample values from a source column, on the card that asks where it belongs. */
+.xsamples { display: flex; flex-wrap: wrap; gap: 6px; }
+.xsamples code { font-size: 11.5px; padding: 3px 8px; border-radius: 5px;
+  background: var(--glass-2); color: var(--ink-mid); border: 1px solid var(--hairline-soft);
+  max-width: 100%; overflow-wrap: anywhere; }

@@ -8,10 +8,11 @@ import urllib.request
 from pydantic import ValidationError
 
 from app.agent.escalate import create_or_merge_escalation
-from app.agent.policy import decide_push, should_retry_push
+from app.agent.policy import decide_push, should_retry_push, signature
+from app.agent.repair import mentioned_fields, propose_repair
 from app.audit import record_change, utcnow
 from app.db import connect, new_id
-from app.progress import Ticker, emit
+from app.progress import RunInterrupted, Ticker, emit
 from app.schema.loader import Schema
 from app.schema.pydantic_builder import build_model
 from app.settings import settings
@@ -55,19 +56,151 @@ def _backoff_seconds(attempt: int, policy: dict) -> float:
     return delay
 
 
+def _propose_repairs(run_id: str, schema, examples: dict[tuple[str, str], dict]) -> None:
+    """Works out what to change for each distinct refusal, in two steps.
+
+    The first step is deterministic and always runs: `mentioned_fields()` reads
+    which field the target named out of its own message. That is what the UI
+    needs to offer "fill these in yourself", so it must not depend on a model
+    being reachable -- an earlier version set it only as a side effect of a
+    successful model call, and a provider outage mid-push therefore turned every
+    remaining question into a dead end with no proposal and no way to answer it.
+
+    The second step asks a model for the value, and is allowed to fail. Each
+    refusal is isolated: one failure costs that one proposal, not the rest of
+    them. The proposal is only ever written to the escalation, never to the
+    record.
+    """
+    emit(run_id, "progress",
+         f"Looking for a fix for {len(examples)} refused value(s)",
+         stage="pushing", what="repair", kinds=len(examples))
+
+    failures = 0
+    for (sig, target_error), payload in examples.items():
+        named = mentioned_fields(target_error, schema)
+        field = next(iter(named)) if len(named) == 1 else None
+        if field:
+            with connect() as conn:
+                conn.execute(
+                    """UPDATE escalations
+                       SET context = json_set(COALESCE(context, '{}'), '$.repair_field', ?)
+                       WHERE run_id = ? AND signature = ? AND status = 'open'
+                         AND json_extract(context, '$.target_error') = ?""",
+                    (field, run_id, sig, target_error),
+                )
+
+        try:
+            proposal, why_not = propose_repair(target_error, payload, schema, run_id=run_id)
+        except RunInterrupted:
+            # A shutdown is not a proposal failure and must not be absorbed by
+            # the catch below, or Ctrl-C would be swallowed once per refusal.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Deliberately broad. A provider can fail in a dozen ways -- rate
+            # limits, transport errors, malformed JSON, a changed SDK exception
+            # -- and every one of them should cost this one proposal rather than
+            # the rest of the queue. Naming them would couple this module to the
+            # provider SDK and still miss one.
+            #
+            # Reported, not swallowed, and not fatal: the question still reaches
+            # the consultant with the field it is about, which is the part that
+            # matters. propose_repair has already emitted its own failure frame.
+            failures += 1
+            with connect() as conn:
+                record_change(
+                    conn, run_id=run_id, actor="llm", stage="pushed",
+                    reason_code="PUSH_REJECTED", entity_type="escalation", entity_id=sig,
+                    field=field,
+                    note=f"no repair proposed, the model call failed: {type(exc).__name__}: {exc}"[:400],
+                )
+            continue
+
+        with connect() as conn:
+            if proposal:
+                # json_set rather than a plain overwrite: every escalation row
+                # carries its own refused payload in context, and only the field
+                # to change is shared across the signature.
+                conn.execute(
+                    """UPDATE escalations
+                       SET suggested_value = ?, suggested_action = ?, evidence = evidence || ?,
+                           context = json_set(COALESCE(context, '{}'), '$.repair_field', ?)
+                       WHERE run_id = ? AND signature = ? AND status = 'open'
+                         AND json_extract(context, '$.target_error') = ?""",
+                    (proposal["proposed_value"],
+                     f"change {proposal['field']} to {proposal['proposed_value']}",
+                     f". The AI looked at what the target refused and suggests: {proposal['rationale']}",
+                     proposal["field"], run_id, sig, target_error),
+                )
+            else:
+                conn.execute(
+                    """UPDATE escalations SET evidence = evidence || ?
+                       WHERE run_id = ? AND signature = ? AND status = 'open'
+                         AND json_extract(context, '$.target_error') = ?""",
+                    (f". The AI could not suggest a safe fix: {why_not}", run_id, sig, target_error),
+                )
+            record_change(
+                conn, run_id=run_id, actor="llm", stage="pushed",
+                reason_code="PUSH_REJECTED", entity_type="escalation", entity_id=sig,
+                field=(proposal or {}).get("field") or field,
+                before=str((proposal or {}).get("current_value") or ""),
+                after=str((proposal or {}).get("proposed_value") or ""),
+                confidence=(proposal or {}).get("confidence"),
+                note=(f"proposed for review, not applied: {proposal['rationale']}" if proposal
+                      else f"no repair proposed: {why_not}"),
+            )
+
+    if failures:
+        emit(run_id, "llm_failed",
+             f"{failures} of {len(examples)} refusals got no suggested fix because the model "
+             "could not be reached. They are still in the queue with the field named.",
+             stage="pushing", what="repair", failures=failures)
+
+
 def push_run(run_id: str, schema: Schema, policy: dict) -> dict:
     """Pushes every reconciled employee to the target, retrying transient
     failures per policy and escalating deterministic rejections. Returns a
     summary dict. Records that still fail full-schema validation after
     reconciliation are marked incomplete and never pushed -- this is the
     'staged' gate, and the only place the strict (all-required) model is used."""
+    try:
+        return _push_run(run_id, schema, policy)
+    except BaseException as exc:
+        # 'pushing' is what stops a second push starting. If a push dies partway
+        # the flag outlives it and the run can never be pushed again -- which
+        # looks exactly like a button that does nothing.
+        #
+        # BaseException, not Exception, because Ctrl-C is the most likely way
+        # this happens and KeyboardInterrupt is not an Exception. Nothing is
+        # swallowed: the state is repaired and the interrupt is re-raised
+        # immediately.
+        with connect() as conn:
+            conn.execute(
+                "UPDATE runs SET stage = 'reconciled', updated_at = ? WHERE id = ? AND stage = 'pushing'",
+                (utcnow(), run_id),
+            )
+        reason = ("the server was shut down" if isinstance(exc, RunInterrupted)
+                  else f"of an unexpected error ({type(exc).__name__})")
+        emit(run_id, "failed",
+             f"The push stopped partway because {reason}. What was already sent is "
+             "recorded and will be skipped next time. You can start it again.",
+             stage="reconciled", error=type(exc).__name__)
+        raise
+
+
+def _push_run(run_id: str, schema: Schema, policy: dict) -> dict:
     cfg = policy["push"]
     strict_model = build_model(schema, require_all=True)
 
     with connect() as conn:
         run = conn.execute("SELECT stage FROM runs WHERE id = ?", (run_id,)).fetchone()
-        if run and run["stage"] in ("pushing", "done"):
-            return {"skipped": "already pushed"}
+        # Only a push that is actually running blocks another one. A finished
+        # run may be pushed again on purpose: that is how a corrected record
+        # reaches the target after a rejection is resolved. It is safe because
+        # pushed_state skips byte-identical records without a request and the
+        # idempotency key is derived from the payload, so re-sending an
+        # unchanged record cannot duplicate it.
+        if run and run["stage"] == "pushing":
+            return {"skipped": "a push is already running"}
         conn.execute("UPDATE runs SET stage = 'pushing', updated_at = ? WHERE id = ?", (utcnow(), run_id))
         candidates = conn.execute(
             "SELECT id, natural_key, data FROM records "
@@ -83,11 +216,12 @@ def push_run(run_id: str, schema: Schema, policy: dict) -> dict:
          stage="pushing", total=len(candidates))
     ticker = Ticker(run_id, "pushing", "Pushed", total=len(candidates), every=250)
 
-    pushed = rejected = incomplete = unchanged = changed = created = 0
+    pushed = rejected = incomplete = unchanged = changed = created = retries = 0
     attempts_rows: list[tuple] = []
-    rejections: list[tuple[str, str, int, int, str]] = []
+    rejections: list[tuple[str, str, int, int, str, dict]] = []
     incomplete_ids: list[str] = []
     pushed_state_rows: list[tuple] = []
+    examples: dict[tuple[str, str], dict] = {}
 
     for record in candidates:
         data = json.loads(record["data"])
@@ -125,7 +259,22 @@ def push_run(run_id: str, schema: Schema, policy: dict) -> dict:
             if status == 200:
                 break
             if should_retry_push(status, policy) and attempt < cfg["max_retries"]:
-                time.sleep(_backoff_seconds(attempt, policy))
+                delay = _backoff_seconds(attempt, policy)
+                retries += 1
+                # The first few are reported individually so the backoff is
+                # visible as it happens, then in batches: a run with hundreds of
+                # transient failures should not bury everything else in the feed.
+                if retries <= 3 or retries % 50 == 0:
+                    emit(run_id, "retry",
+                         f"{employee_id} got HTTP {status} from the target, "
+                         f"waiting {delay:.1f}s before try {attempt + 2} of "
+                         f"{cfg['max_retries'] + 1}"
+                         + (f" ({retries:,} transient failures retried so far)"
+                            if retries > 3 else ""),
+                         stage="pushing", employee_id=employee_id, status=status,
+                         wait_seconds=round(delay, 2), attempt=attempt + 2,
+                         max_attempts=cfg["max_retries"] + 1, retries_so_far=retries)
+                time.sleep(delay)
                 continue
             break
 
@@ -135,8 +284,10 @@ def push_run(run_id: str, schema: Schema, policy: dict) -> dict:
             pushed_state_rows.append((employee_id, digest, run_id, utcnow()))
         else:
             rejected += 1
+            # The payload travels with the rejection: a corrected value can only
+            # be proposed later against what was actually sent.
             rejections.append((record["id"], employee_id, status, cfg["max_retries"] + 1,
-                               str(body.get("error", ""))))
+                               str(body.get("error", "")), data))
 
     with connect() as conn:
         conn.executemany(
@@ -158,10 +309,21 @@ def push_run(run_id: str, schema: Schema, policy: dict) -> dict:
                 "UPDATE records SET status = 'incomplete', updated_at = ? WHERE id = ?",
                 (utcnow(), record_id),
             )
-        for record_id, employee_id, status, attempts, target_error in rejections:
+        for record_id, employee_id, status, attempts, target_error, payload in rejections:
             decision = decide_push(employee_id, status, attempts, policy, target_error)
             if decision.reason_code:
+                decision.context["employee_id"] = employee_id
+                decision.context["payload"] = payload
                 create_or_merge_escalation(conn, run_id, decision, entity_id=record_id)
+                # Keyed on the target's *exact* message, not on the signature.
+                # The signature deliberately strips the offending value so that
+                # one reason is one question -- but the repair is not shared:
+                # 102 different misspelled job titles are one question and 102
+                # different corrections. Proposing per signature would have
+                # rewritten every one of them to whichever title came first.
+                examples.setdefault(
+                    (signature("PUSH_REJECTED", decision.scope_key), target_error),
+                    payload)
         record_change(
             conn, run_id=run_id, actor="agent", stage="pushed", entity_type="run", entity_id=run_id,
             after="done",
@@ -169,6 +331,12 @@ def push_run(run_id: str, schema: Schema, policy: dict) -> dict:
                   f"skipped {unchanged} unchanged, rejected {rejected}, incomplete {incomplete}"),
         )
         conn.execute("UPDATE runs SET stage = 'done', updated_at = ? WHERE id = ?", (utcnow(), run_id))
+
+    # Deliberately after the transaction above has closed. These are network
+    # calls, and making them while holding SQLite's single write lock is how the
+    # progress stream deadlocked before.
+    if examples:
+        _propose_repairs(run_id, schema, examples)
 
     total = pushed + rejected
     failure_rate = (rejected / total) if total else 0.0

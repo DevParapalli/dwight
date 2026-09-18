@@ -1,12 +1,13 @@
 import hashlib
 import json
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 
-from groq import Groq, RateLimitError
+from groq import APIConnectionError, Groq, RateLimitError
 
 from app.db import connect, new_id
 from app.settings import settings
@@ -24,6 +25,38 @@ def _parse_groq_duration(text: str) -> float | None:
     minutes = float(m.group("minutes") or 0)
     seconds = float(m.group("seconds") or 0)
     return minutes * 60 + seconds
+
+
+# Hosted models whose budget is gone for the day. Waiting does not help and every
+# later call to that model would fail the same way, so it leaves the rotation for
+# the rest of the process rather than being re-learned per call.
+_exhausted_models: set[str] = set()
+
+
+def groq_chain() -> list[str]:
+    """Hosted models to try, in order, skipping any already out of budget."""
+    if not settings.groq_env_key:
+        return []
+    ordered = [settings.groq_model] + [
+        m.strip() for m in settings.groq_fallback_models.split(",") if m.strip()
+    ]
+    seen, chain = set(), []
+    for model in ordered:
+        if model and model not in seen and model not in _exhausted_models:
+            seen.add(model)
+            chain.append(model)
+    return chain
+
+
+def groq_available() -> bool:
+    return bool(groq_chain())
+
+
+def _is_daily_quota(error: Exception) -> bool:
+    """A per-day cap, as opposed to a per-minute one. The per-minute limits are
+    worth waiting out; the daily one is not -- it is gone until tomorrow."""
+    message = str(error).lower()
+    return "per day" in message or "tpd" in message or "rpd" in message
 
 
 def _is_retryable_rate_limit(error: RateLimitError) -> bool:
@@ -65,15 +98,18 @@ class LLMNotConfigured(Exception):
 def active_model() -> str:
     """Which model would actually serve the next call -- used as the cache key
     and audit `model` field, so a local-model result never gets mislabeled or
-    cache-collided under the Groq model's name."""
-    if settings.groq_env_key:
-        return settings.groq_model
+    cache-collided under the Groq model's name. It follows the same fallback the
+    calls do, so a result cached after a fallback is keyed to what produced it."""
+    chain = groq_chain()
+    if chain:
+        return chain[0]
     if settings.local_fallback_model:
         return f"local:{settings.local_fallback_model}"
     return "none"
 
 
-def _complete_json_groq(system_prompt: str, user_prompt: str, max_tokens: int) -> tuple[dict, int]:
+def _complete_json_groq(system_prompt: str, user_prompt: str, max_tokens: int,
+                        model: str | None = None) -> tuple[dict, int]:
     """Bounded retry on 429 only -- a rate limit is transient and expected under
     load (this project's own mapping stage can fire dozens of calls in quick
     succession); any other error is a real failure and must not be retried away."""
@@ -82,7 +118,7 @@ def _complete_json_groq(system_prompt: str, user_prompt: str, max_tokens: int) -
     for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=settings.groq_model,
+                model=model or settings.groq_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -148,12 +184,68 @@ def _complete_json_local(system_prompt: str, user_prompt: str, max_tokens: int) 
 
 
 def complete_json(system_prompt: str, user_prompt: str, max_tokens: int | None = None) -> tuple[dict, int]:
+    """Hosted model first, local model if the hosted one cannot serve the call.
+
+    The local model is named `local_fallback_model` but was never actually a
+    fallback: with a key set, a hosted outage or an exhausted daily quota failed
+    the whole run while a working model sat idle on localhost. It now falls back
+    for the two failures a fallback is for -- the provider being unreachable, and
+    the account being out of budget for the day. A per-minute rate limit is still
+    waited out rather than escaped, because that one resolves by itself, and a
+    bad request still fails loudly rather than being retried elsewhere.
+    """
     budget = max_tokens or settings.llm_max_output_tokens
-    if settings.groq_env_key:
-        return _complete_json_groq(system_prompt, user_prompt, budget)
+    chain = groq_chain()
+
+    for position, model in enumerate(chain):
+        try:
+            return _complete_json_groq(system_prompt, user_prompt, budget, model=model)
+        except (RateLimitError, APIConnectionError) as exc:
+            # A model out of budget for the day leaves the rotation for the rest
+            # of the process; an unreachable provider takes all of them out,
+            # since the next one is the same endpoint. "Request too large" is a
+            # property of one request, so that model stays in rotation and only
+            # this call moves on.
+            if isinstance(exc, APIConnectionError):
+                _exhausted_models.update(chain)
+            elif _is_daily_quota(exc):
+                _exhausted_models.add(model)
+
+            remaining = chain[position + 1:] if not isinstance(exc, APIConnectionError) else []
+            next_model = (remaining[0] if remaining
+                          else settings.local_fallback_model or None)
+            if next_model is None:
+                raise
+            print(f"{model} unavailable ({type(exc).__name__}); trying {next_model}",
+                  file=sys.stderr)
+
     if settings.local_fallback_model:
         return _complete_json_local(system_prompt, user_prompt, budget)
     raise LLMNotConfigured("no GROQ_ENV_KEY and no LOCAL_FALLBACK_MODEL configured")
+
+
+def complete_json_reported(system_prompt: str, user_prompt: str, max_tokens: int | None = None,
+                           report=None) -> tuple[dict, int, str]:
+    """complete_json, plus a note when the chain moves and when a call fails.
+
+    The routing decision is made down here but it is only interesting up there,
+    where a run_id exists and frames can be written. Rather than thread a run_id
+    through every model call, the caller passes a reporter and this tells it the
+    two things worth seeing: that a model dropped out and which one took over, or
+    that the call failed outright. Returns the model that actually answered.
+    """
+    before = active_model()
+    try:
+        result, latency_ms = complete_json(system_prompt, user_prompt, max_tokens)
+    except Exception as exc:
+        if report:
+            report("llm_failed", f"{before} could not answer: {type(exc).__name__}: {exc}"[:300])
+        raise
+
+    after = active_model()
+    if report and after != before:
+        report("llm_switch", f"{before} is out of budget — now using {after}")
+    return result, latency_ms, after
 
 
 def _prompt_hash(model: str, system_prompt: str, user_prompt: str) -> str:

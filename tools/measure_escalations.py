@@ -68,15 +68,32 @@ def _latest_run(conn: sqlite3.Connection) -> str:
 
 
 def _escalated_employees(conn: sqlite3.Connection, run_id: str, reason_code: str) -> set[str]:
-    """Employee ids behind escalations of one reason code, resolved through the
-    record the escalation points at."""
+    """Employee ids behind escalations of one reason code.
+
+    Two sources, unioned. A record-scoped escalation points straight at the
+    record it is about. A class-scoped one carries a single example, because its
+    whole purpose is that one question covers many rows -- so counting only its
+    entity_id would credit one employee out of hundreds and report a recall of
+    nearly zero for a code that caught everything. The per-occurrence audit rows
+    written alongside those escalations are what make the covered employees
+    recoverable.
+    """
     rows = conn.execute(
         """SELECT DISTINCT r.natural_key
            FROM escalations e JOIN records r ON r.id = e.entity_id
            WHERE e.run_id = ? AND e.reason_code = ? AND r.natural_key IS NOT NULL""",
         (run_id, reason_code),
     ).fetchall()
-    return {r["natural_key"] for r in rows}
+    employees = {r["natural_key"] for r in rows}
+
+    audited = conn.execute(
+        """SELECT DISTINCT r.natural_key
+           FROM audit_events a JOIN records r ON r.id = a.entity_id
+           WHERE a.run_id = ? AND a.reason_code = ? AND a.entity_type = 'record'
+             AND r.natural_key IS NOT NULL""",
+        (run_id, reason_code),
+    ).fetchall()
+    return employees | {r["natural_key"] for r in audited}
 
 
 def _score(expected: set[str], detected: set[str]) -> dict:

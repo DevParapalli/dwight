@@ -40,6 +40,17 @@ def ingest_and_map(run_id: str, source_paths: list[Path], schema: Schema, policy
 
         for index, profile in enumerate(profiles, start=1):
             proposal = propose_mapping(profile, schema)
+            emit(run_id, "llm",
+                 (f"{profile.name!r} -> "
+                  + (f"{proposal.target_field} at {proposal.confidence:.0%} confidence"
+                     if proposal.target_field else "no target field")
+                  + (" (from cache)" if proposal.cache_hit
+                     else f" ({proposal.latency_ms / 1000:.1f}s)" if proposal.source == "llm"
+                     else " (name similarity, no model configured)")),
+                 stage="mapped", what="column mapping", model=proposal.model,
+                 column=profile.name, field=proposal.target_field,
+                 confidence=proposal.confidence, cached=proposal.cache_hit,
+                 rationale=proposal.rationale)
             decision = decide_mapping(
                 profile.name, table.filename, proposal.target_field, proposal.confidence,
                 proposal.alternatives, profile.null_rate, policy,
@@ -149,7 +160,8 @@ def clean_and_validate(run_id: str, schema: Schema, policy: dict) -> None:
                      stage="cleaned", what="normalise", file=filename,
                      field=field_name, distinct=len(values))
         normalization_maps = {
-            field_name: normalize_values(field_name, schema.fields[field_name].values, sorted(values))
+            field_name: normalize_values(field_name, schema.fields[field_name].values,
+                                         sorted(values), run_id=run_id)
             for field_name, values in unresolved.items() if values
         }
 

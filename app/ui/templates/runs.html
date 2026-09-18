@@ -14,10 +14,7 @@
   <div class="actions">
     {# Testing-only, and only rendered when the flag that registers the route is
        on, so the button can never be a dead end. #}
-    <form method="post" action="/nuke"
-          onsubmit="return confirm('Delete every run, record, question and audit event, in this app and in the target system? This cannot be undone.')">
-      <button class="btn btn-ghost btn-sm" type="submit">Nuke all data</button>
-    </form>
+    <a class="btn btn-ghost btn-sm" href="/nuke">Clear all data</a>
   </div>
   {% endif %}
 </div>

@@ -17,6 +17,10 @@ async def lifespan(app: FastAPI):
     # the event loop without the SSE stream having to poll for them.
     progress.bind_loop(asyncio.get_running_loop())
     yield
+    # A stage runs in a threadpool worker and cannot be cancelled from here, so
+    # it is asked to stop instead. Without this, Ctrl-C during a push waits for
+    # the whole push to finish and then reports a thread-join traceback.
+    progress.request_stop()
 
 
 app = FastAPI(title="dwight", lifespan=lifespan)

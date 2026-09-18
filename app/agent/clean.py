@@ -98,7 +98,10 @@ def parse_date_value(value, accepted_formats: list[str]) -> tuple[date | None, b
         if fmt in ("excel_serial", "epoch_seconds"):
             continue
         try:
-            return datetime.strptime(raw, fmt).date(), False
+            # The result is a date, not a moment. A birth date or a hire date
+            # has no timezone, and attaching one would invent an instant the
+            # source never recorded -- hence the suppression below.
+            return datetime.strptime(raw, fmt).date(), False  # noqa: DTZ007
         except ValueError:
             continue
 

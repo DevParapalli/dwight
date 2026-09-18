@@ -13,6 +13,15 @@ dates:
 dedupe:
   auto_merge_above: 0.90
   escalate_band: [0.72, 0.90]
+  # A pair inside the band is shown to the model before it is shown to a person.
+  # The model may only argue that the two are DIFFERENT people, which leaves them
+  # unmerged -- it is never allowed to confirm a merge, because a merge cannot be
+  # undone. Below this confidence the pair goes to a person anyway.
+  llm_auto_separate_min_confidence: 0.75
+  # Above this many ambiguous pairs, skip the model entirely and escalate them
+  # all: that many suggests the scorer is wrong, and a per-pair model call is
+  # the wrong thing to spend on a scoring problem.
+  llm_judge_max_pairs: 200
 validation:
   max_correction_attempts: 1
 cross_source:

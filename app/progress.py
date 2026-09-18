@@ -27,6 +27,25 @@ _lock = threading.Lock()
 # Kinds that mean the run has stopped moving, so a stream can close.
 TERMINAL_KINDS = {"finished", "waiting", "failed"}
 
+# Set when the server is shutting down. A stage runs inside a threadpool worker,
+# which cannot be interrupted from outside -- Ctrl-C just waits for it, which is
+# why interrupting a push used to hang for minutes and then print a thread-join
+# traceback. Instead the stages ask, at the points they were already stopping to
+# report progress, whether they should stop.
+_stopping = threading.Event()
+
+
+class RunInterrupted(RuntimeError):
+    """Raised inside a stage when the server is shutting down."""
+
+
+def request_stop() -> None:
+    _stopping.set()
+
+
+def stop_requested() -> bool:
+    return _stopping.is_set()
+
 
 def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _loop
@@ -100,6 +119,12 @@ class Ticker:
     def tick(self, n: int = 1, conn=None) -> None:
         self.count += n
         if self.count % self.every == 0:
+            # Checked here because it is already the boundary where the batch is
+            # committed, so stopping now leaves the work so far durable.
+            if _stopping.is_set():
+                if conn is not None:
+                    conn.commit()
+                raise RunInterrupted(f"stopped during {self.what} at {self.count:,}")
             # A caller batching its writes on one connection holds SQLite's
             # single write lock for the whole batch. The frame below goes out on
             # a different connection, so it would block until that batch ended

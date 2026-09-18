@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}dwight{% endblock %}</title>
-  <link rel="stylesheet" href="/static/css/proxima.css">
-  <link rel="stylesheet" href="/static/css/dwight.css">
+  <link rel="stylesheet" href="/static/css/proxima.css?v={{ asset_version }}">
+  <link rel="stylesheet" href="/static/css/dwight.css?v={{ asset_version }}">
   <script>(function(){try{var h=document.documentElement,t=localStorage.getItem('proxima-theme'),a=localStorage.getItem('proxima-accent'),b=localStorage.getItem('proxima-bg');if(t==='light')h.classList.add('theme-light');if(a&&a!=='indigo')h.classList.add('accent-'+a);if(b==='flat')h.classList.add('bg-flat');}catch(e){}})();</script>
-  <script src="/static/js/proxima.js" defer></script>
+  <script src="/static/js/proxima.js?v={{ asset_version }}" defer></script>
   {% block head %}{% endblock %}
 </head>
 <body>
@@ -17,7 +17,7 @@
 
 <div class="shell">
   <aside class="side" id="app-nav">
-    <a class="brand" href="/"><span class="orb" aria-hidden="true"></span><span>dwight<small>Migration</small></span></a>
+    <a class="brand" href="/"><span class="orb" aria-hidden="true"></span><span>dwight<small>dw, its an alright data migration tool</small></span></a>
 
     <span class="rail-label">Run</span>
     <nav aria-label="Run">
@@ -51,7 +51,7 @@
 
     <div class="foot">
       <span class="av" aria-hidden="true">DP</span>
-      <div class="who"><b>Consultant</b><span>implementation</span></div>
+      <div class="who"><b>Devansh Parapalli</b><span>hey@parapalli.dev</span></div>
     </div>
   </aside>
 
@@ -59,6 +59,10 @@
     <div class="topbar">
       <span class="t-data">{% block topbar %}dwight · migration agent{% endblock %}</span>
       <div class="right">
+        <a class="credit" href="https://proxima.parapalli.dev"
+           target="_blank" rel="noopener noreferrer">
+          styled using <span>proxima.parapalli.dev</span>
+        </a>
         {% block topbar_right %}{% endblock %}
       </div>
     </div>

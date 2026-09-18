@@ -2,6 +2,15 @@
 {% set nav_page = 'push' %}
 {% block title %}Push · dwight{% endblock %}
 {% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block topbar_right %}
+  <span class="live" id="live-pill" hidden><i></i><span id="live-word">live</span></span>
+{% endblock %}
+
+{% block head %}
+{# Without JavaScript there is no stream, so the page falls back to reloading
+   itself while a push is running. #}
+{% if is_active %}<noscript><meta http-equiv="refresh" content="5"></noscript>{% endif %}
+{% endblock %}
 {% block content %}
 
 <div class="page-head">
@@ -14,9 +23,15 @@
     </div>
   </div>
   <div class="actions">
+    {% if is_active %}
+    <span class="pill pill-sky"><i class="dot"></i>Push in progress</span>
+    {% else %}
     <form method="post" action="/runs/{{ run_id }}/push">
-      <button class="btn btn-primary" type="submit">Push reconciled employees</button>
+      <button class="btn btn-primary" type="submit">
+        {% if succeeded %}Push again{% else %}Push reconciled employees{% endif %}
+      </button>
     </form>
+    {% endif %}
   </div>
 </div>
 
@@ -36,6 +51,27 @@
     <div class="k-val">{{ "{:,}".format(retried) }}</div>
     <div class="k-foot"><span>transient failures absorbed</span></div>
   </div>
+</div>
+
+{% if open_escalations %}
+<div class="card">
+  <div class="callout"><span aria-hidden="true">!</span><span>
+    <b>{{ open_escalations }} question{{ '' if open_escalations == 1 else 's' }} need{{ 's' if open_escalations == 1 else '' }} you.</b>
+    <span>The target refused some records for reasons retrying cannot fix. Answer
+    them and push again — only the corrected records are sent.</span>
+  </span></div>
+  <div style="margin-top:14px">
+    <a class="btn btn-primary btn-sm" href="/runs/{{ run_id }}/queue">Review the questions</a>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <header>
+    <h3>What the agent is doing</h3>
+    <p>Each employee is sent to the target system one at a time. This updates itself.</p>
+  </header>
+  {% include "_activity.html" %}
 </div>
 
 <div class="card">

@@ -16,9 +16,14 @@
 
 {% for reason_code, group in groups.items() %}
 <section class="card">
+  {% set info = help.get(reason_code) %}
   <header>
-    <h3>{{ reason_code | replace('_', ' ') | title }}</h3>
-    <p>{{ group.total }} question{{ '' if group.total == 1 else 's' }}, {{ "{:,}".format(group.rows_affected) }} row{{ '' if group.rows_affected == 1 else 's' }} affected.</p>
+    <h3>{{ info.title if info else reason_code | replace('_', ' ') | title }}</h3>
+    <p>
+      {{ group.total }} question{{ '' if group.total == 1 else 's' }},
+      {{ "{:,}".format(group.rows_affected) }} record{{ '' if group.rows_affected == 1 else 's' }} affected.
+      {% if info %}{{ info.means }}{% endif %}
+    </p>
   </header>
 
   {% for card in group.cards %}
@@ -40,7 +45,64 @@
 
       {# A question about a specific row cannot be answered without seeing the
          row. Collapsed by default so the queue still scans quickly. #}
-      {% if card.examples %}
+      {# A mapping question is about a column, so the column's own values are the
+         evidence. Confidence alone cannot be acted on. #}
+      {% if card.column %}
+      <div style="margin-bottom:12px">
+        <div class="t-label">( WHAT IS IN THIS COLUMN )</div>
+        <div class="xsamples">
+          {% for v in card.column.samples %}<code>{{ v if v else '(empty)' }}</code>{% endfor %}
+          {% if not card.column.samples %}<span class="t-data">no sample values recorded</span>{% endif %}
+        </div>
+        <div class="t-data" style="margin-top:6px">
+          looks like {{ card.column.inferred_type or 'text' }} ·
+          {{ "{:,}".format(card.column.distinct_count or 0) }} distinct value{{ '' if card.column.distinct_count == 1 else 's' }} ·
+          {{ "{:.0%}".format(card.column.null_rate or 0) }} empty
+        </div>
+      </div>
+      {% endif %}
+
+      {% if card.pair %}
+      <details class="xdetails" open>
+        <summary>Compare the two records side by side</summary>
+        <div class="xdetails-body">
+          <p class="t-data" style="margin:0 0 10px">
+            {% if card.pair.differing %}
+            They differ on {{ card.pair.differing }} field{{ '' if card.pair.differing == 1 else 's' }}, marked below.
+            {% else %}
+            Every field shown is identical in both records.
+            {% endif %}
+          </p>
+          <div class="xcompare">
+            <table>
+              <caption class="sr-only">
+                Record A, {{ card.pair.left.label }} from {{ card.pair.left.filename }},
+                compared with record B, {{ card.pair.right.label }} from {{ card.pair.right.filename }}.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Field</th>
+                  <th scope="col">Record A · <span class="mono">{{ card.pair.left.label }}</span><br><span class="t-data">{{ card.pair.left.filename }}</span></th>
+                  <th scope="col">Record B · <span class="mono">{{ card.pair.right.label }}</span><br><span class="t-data">{{ card.pair.right.filename }}</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for f in card.pair.fields %}
+                <tr{% if f.differs %} class="xdiff"{% endif %}>
+                  <th scope="row">{{ f.name | replace('_', ' ') }}</th>
+                  <td class="mono">{{ f.left or '—' }}</td>
+                  <td class="mono">
+                    {{ f.right or '—' }}
+                    {% if f.differs %}<span class="sr-only">(different)</span>{% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+      {% elif card.examples %}
       <details class="xdetails">
         <summary>
           Show the {{ card.examples | length }} affected record{{ '' if card.examples | length == 1 else 's' }}{% if card.rows_affected > card.examples | length %} of {{ "{:,}".format(card.rows_affected) }}{% endif %}
@@ -76,6 +138,14 @@
           <b>If you approve:</b>
           <span>{{ card.suggested_action }} — <code>{{ card.suggested_value }}</code>.</span>
         </span>
+        {% elif card.fill_field %}
+        <span aria-hidden="true">?</span>
+        <span>
+          <b>The agent will not guess these.</b>
+          <span>Each of these {{ "{:,}".format(card.rows_affected) }} records needs its own
+          {{ card.fill_field | replace('_', ' ') }}, and nothing in the record implies it.
+          You can enter them together.</span>
+        </span>
         {% else %}
         <span aria-hidden="true">?</span>
         <span>
@@ -86,6 +156,7 @@
       </div>
 
       <form method="post" action="/runs/{{ run_id }}/escalations/{{ card.id }}/resolve">
+        {% if not card.fill_field %}
         <div class="field">
           <label for="value-{{ card.id }}">Refine before saving</label>
           {% if card.reason_code in ("MAP_AMBIGUOUS", "MAP_UNMAPPED") %}
@@ -116,8 +187,9 @@
           {% endif %}
           <span class="help">Pre-filled with what the agent proposed. Change it and use Save edit, or approve it as-is.</span>
         </div>
+        {% endif %}
 
-        {% if card.similar_count > 1 %}
+        {% if card.similar_count > 1 and not card.fill_field %}
         <div class="setrow">
           <div class="info">
             <b>Apply to all {{ card.similar_count }} similar</b>
@@ -130,11 +202,41 @@
         </div>
         {% endif %}
 
+      {# What each button will actually do, in the consultant's words. A person
+         should never have to infer the consequence of a button from its label. #}
+      {% if info %}
+      <dl class="xoutcomes">
+        {% if card.fill_field and card.suggested_value %}
+        <div><dt>If you approve</dt><dd>Each record gets the correction the agent worked out for it, and is sent on the next push.</dd></div>
+        <div><dt>If you review</dt><dd>You see every row with its correction filled in, and can change any of them first.</dd></div>
+        {% elif card.fill_field %}
+        <div><dt>If you fill them in</dt><dd>Each record gets the value you give it and is sent on the next push.</dd></div>
+        {% else %}
+        <div><dt>If you approve</dt><dd>{{ info.approve | capitalize }}.</dd></div>
+        {% endif %}
+        <div><dt>If you reject</dt><dd>{{ info.reject | capitalize }}.</dd></div>
+      </dl>
+      {% endif %}
+
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
           {% if card.suggested_value %}
           <button class="btn btn-primary btn-sm" type="submit" name="action" value="approve">
-            Approve: {{ card.suggested_value }}
+            {# Only a refusal gives each row its own correction, so only there is
+               naming one value misleading. Everywhere else, say what is being
+               approved. #}
+            {% if card.fill_field %}Approve all {{ "{:,}".format(card.rows_affected) }}
+            {% else %}Approve: {{ card.suggested_value }}{% endif %}
           </button>
+          {% endif %}
+          {% if card.fill_field %}
+          {# Always available, even when there is a proposal: approving in one
+             click is for when you trust it, this is for when you want to see it. #}
+          <a class="btn {{ 'btn-glass' if card.suggested_value else 'btn-primary' }} btn-sm"
+             href="/runs/{{ run_id }}/escalations/{{ card.id }}/fill">
+            {% if card.suggested_value %}Review {{ "{:,}".format(card.rows_affected) }} row{{ '' if card.rows_affected == 1 else 's' }}
+            {% else %}Fill in {{ "{:,}".format(card.rows_affected) }} {{ card.fill_field | replace('_', ' ') }}{{ '' if card.rows_affected == 1 else 's' }}{% endif %}
+          </a>
+          {% elif card.suggested_value %}
           <button class="btn btn-glass btn-sm" type="submit" name="action" value="edit">Save my change</button>
           {% else %}
           <button class="btn btn-primary btn-sm" type="submit" name="action" value="edit">Save my choice</button>

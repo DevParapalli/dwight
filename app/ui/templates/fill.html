@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% set nav_page = 'queue' %}
+{% block title %}Fill in {{ field | replace('_', ' ') }} · dwight{% endblock %}
+{% block topbar %}<span class="t-data">run {{ run_id }}</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>FILL IN THE MISSING VALUES</b> )</div>
+    <h1>{{ rows | length }} record{{ '' if rows | length == 1 else 's' }} need a <em class="serif-em">{{ field | replace('_', ' ') }}</em>.</h1>
+    <div class="when">
+      {{ question }}
+      {% if remaining > rows | length %}
+      Showing the first {{ rows | length }} of {{ "{:,}".format(remaining) }} — save these and the rest appear next.
+      {% endif %}
+    </div>
+  </div>
+  <div class="actions"><a class="btn btn-glass btn-sm" href="/runs/{{ run_id }}/queue">Back to questions</a></div>
+</div>
+
+<div class="card">
+  {% set proposed_count = rows | selectattr('proposed') | list | length %}
+  {% if proposed_count %}
+  <div class="callout"><span aria-hidden="true">→</span><span>
+    <b>{{ "{:,}".format(proposed_count) }} row{{ '' if proposed_count == 1 else 's' }} already filled in with the agent's own correction.</b>
+    <span>Each row gets its own — one refusal can cover many different wrong values, so they are
+    not all the same. Check them, change any you disagree with, then save.</span>
+  </span></div>
+  {% else %}
+  <div class="callout"><span aria-hidden="true">?</span><span>
+    <b>The agent will not guess these.</b>
+    <span>Each record needs a different value, and nothing else in the record implies it.
+    A plausible guess is worse than a blank, because it looks like knowledge. So it asks you.</span>
+  </span></div>
+  {% endif %}
+
+  {% if applied %}
+  <div class="callout" style="margin-top:12px"><span aria-hidden="true">✓</span><span>
+    <b>{{ applied }} saved.</b> <span>They will be sent on the next push.</span>
+  </span></div>
+  {% endif %}
+
+  {% if rejected %}
+  <div class="callout" style="margin-top:12px"><span aria-hidden="true">!</span><span>
+    <b>{{ rejected | length }} value{{ '' if rejected | length == 1 else 's' }} could not be used.</b>
+    <span>Nothing was saved for these, so they are still listed below.</span>
+  </span></div>
+  <div class="dtable" style="margin-top:10px">
+    <table>
+      <thead><tr><th>Employee</th><th>You entered</th><th>Why it was refused</th></tr></thead>
+      <tbody>
+        {% for r in rejected %}
+        <tr><td class="mono">{{ r.employee_id }}</td><td class="mono">{{ r.value }}</td><td>{{ r.why }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{# One form: the instruction fills the rows in, you look at them, you save.
+   Nothing is written by the instruction itself. #}
+<form method="post" action="/runs/{{ run_id }}/escalations/{{ escalation_id }}/fill">
+  <div class="card">
+    <header>
+      <h3>Tell the agent what to do</h3>
+      <p>Plain English. It fills the rows in below for you to check — it does not save anything.</p>
+    </header>
+
+    <div class="field">
+      <label for="instruction">Your instruction</label>
+      <input id="instruction" name="instruction" type="text" value="{{ instruction or '' }}"
+             placeholder="set date of birth to 1919-01-01, we will remap it in prod later">
+      <span class="help">It can set this one field to one value for every row. It cannot choose a
+        different field, give different rows different values, or invent a value you did not name.</span>
+    </div>
+
+    <div style="margin-top:12px">
+      <button class="btn btn-glass btn-sm" type="submit" name="action" value="interpret">
+        {% if plan %}Fill them in again{% else %}Fill in the rows below{% endif %}
+      </button>
+    </div>
+
+    {% if plan %}
+    <div class="callout" style="margin-top:12px"><span aria-hidden="true">✓</span><span>
+      {% set blanks = rows | rejectattr('current') | list | length %}
+      <b>Filled in {{ "{:,}".format(blanks) }} empty row{{ '' if blanks == 1 else 's' }} with <code>{{ plan.value }}</code>.</b>
+      <span>{{ plan.reading }}
+      {% if plan.placeholder %} It is recorded as a deliberate placeholder in the audit trail.{% endif %}
+      {% if blanks < rows | length %}Rows that already had a value were left alone.{% endif %}
+      Change any row you like, then save.</span>
+    </span></div>
+    {% elif plan_refused %}
+    <div class="callout" style="margin-top:12px"><span aria-hidden="true">!</span><span>
+      <b>It will not do that.</b> <span>{{ plan_refused }} Nothing was changed.</span>
+    </span></div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <header>
+      <h3>Or paste them in</h3>
+      <p>One per line, as <code>employee id, value</code> — the quick path when you already have
+        them in a spreadsheet. A pasted value fills any row you left blank.</p>
+    </header>
+    <div class="field">
+      <label for="pasted">{{ field | replace('_', ' ') | capitalize }} per employee</label>
+      <textarea id="pasted" name="pasted" rows="5"
+                placeholder="EMP000123, 1988-04-17&#10;EMP000456, 1991-11-02"></textarea>
+      <span class="help">
+        {% if field_spec and field_spec.type == 'date' %}Dates are read the same way as the source files — <code>YYYY-MM-DD</code> is always unambiguous.
+        {% elif field_spec and field_spec.values %}Allowed values: {{ field_spec.values | join(', ') }}.
+        {% else %}Each value is checked before it is saved.{% endif %}
+      </span>
+    </div>
+  </div>
+
+  <div class="card">
+    <header>
+      <h3>What will be saved</h3>
+      <p>The middle column is what the target rejected; the last is what will be sent instead.
+        Leave a row blank to skip it — it stays in the queue and nothing is written for it.</p>
+    </header>
+    <div class="dtable">
+      <table>
+        <thead>
+          <tr>
+            <th>Employee</th><th>Name</th>
+            <th>The target refused</th>
+            <th>{{ field | replace('_', ' ') | capitalize }} to send</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td class="mono">{{ r.employee_id or '—' }}</td>
+            <td>{{ r.name or '—' }}</td>
+            <td class="mono was">{{ r.current or '(empty)' }}</td>
+            <td>
+              <label class="sr-only" for="value-{{ r.escalation_id }}">
+                {{ field | replace('_', ' ') }} for {{ r.employee_id or r.name or 'this record' }}
+              </label>
+              <input id="value-{{ r.escalation_id }}" name="value-{{ r.escalation_id }}"
+                     type="{{ 'date' if field_spec and field_spec.type == 'date' else 'text' }}"
+                     value="{{ r.proposed or prefill or '' }}">
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4">Nothing left to fill in.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:14px">
+      <button class="btn btn-primary" type="submit" name="action" value="save">
+        Save {{ "{:,}".format(rows | length) }} row{{ '' if rows | length == 1 else 's' }}
+      </button>
+    </div>
+  </div>
+</form>
+
+{% endblock %}

@@ -2,25 +2,31 @@ import asyncio
 import csv
 import io
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import APIRouter, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-import httpx
+from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.agent.policy import load_policy
+from app import progress
+from app.agent.instruct import interpret_bulk_instruction
+from app.agent.policy import RULE_DESCRIPTIONS, load_policy
 from app.agent.push import push_run, rollback_run
 from app.agent.resolve import resolve_escalation
 from app.agent.runner import advance_run, mapping_gate_is_open, run_status
-from app import progress
 from app.audit import record_change, utcnow
 from app.db import connect, new_id, truncate_all
+from app.progress import emit
 from app.schema.loader import load_schema
+from app.schema.pydantic_builder import build_model
+from app.schema.rules import RuleContext, evaluate_rules
 from app.settings import settings
 
 router = APIRouter()
@@ -44,6 +50,26 @@ def _local_time(value: str | None) -> str:
 
 
 templates.env.filters["local_time"] = _local_time
+
+
+def _asset_version() -> str:
+    """Newest mtime across the static assets, as a cache-busting suffix.
+
+    The activity feed's styling used to live in a <style> block inside the
+    template, so it could never be out of step with the markup. Moving it to a
+    stylesheet made that possible: a browser holding yesterday's dwight.css
+    renders today's markup unstyled, which looks like broken code rather than a
+    stale cache. Keying the URL to the file's mtime means a changed stylesheet
+    is a different URL.
+    """
+    static = Path(__file__).parent / "static"
+    try:
+        return str(int(max(f.stat().st_mtime for f in static.rglob("*") if f.is_file())))
+    except ValueError:
+        return "0"
+
+
+templates.env.globals["asset_version"] = _asset_version()
 
 # Background tasks are kept referenced so they aren't garbage collected mid-run.
 _background_tasks: set[asyncio.Task] = set()
@@ -96,6 +122,24 @@ async def start_run(request: Request, files: list[UploadFile]):
 # clears dwight's tables and the mock target clears its own, because neither
 # owns the other's database.
 if settings.enable_nuke:
+
+    @router.get("/nuke")
+    async def nuke_confirm(request: Request):
+        """Deliberate second step before emptying everything.
+
+        A JavaScript confirm() was the only guard, which is no guard at all on
+        the no-JS path this app promises to support: a plain POST wiped both
+        databases with nothing in the way. Now the destructive action needs a
+        page of its own that a person has to arrive at on purpose.
+        """
+        with connect() as conn:
+            counts = {
+                "runs": conn.execute("SELECT COUNT(*) n FROM runs").fetchone()["n"],
+                "records": conn.execute("SELECT COUNT(*) n FROM records").fetchone()["n"],
+                "questions": conn.execute("SELECT COUNT(*) n FROM escalations").fetchone()["n"],
+                "audit events": conn.execute("SELECT COUNT(*) n FROM audit_events").fetchone()["n"],
+            }
+        return templates.TemplateResponse(request, "nuke.html", {"counts": counts})
 
     @router.post("/nuke")
     async def nuke(request: Request):
@@ -177,7 +221,8 @@ async def view_mappings(request: Request, run_id: str):
     ]
     return templates.TemplateResponse(
         request, "mappings.html",
-        {"run_id": run_id, "mappings": mappings, "target_fields": list(schema.fields)},
+        {"run_id": run_id, "mappings": mappings, "target_fields": list(schema.fields),
+         "open_escalations": open_question_count(run_id)},
     )
 
 
@@ -226,6 +271,90 @@ CARDS_PER_REASON_CODE = 25
 # without seeing the row it is about, so the row travels with the question.
 ROWS_PER_CARD = 5
 
+# How many records the bulk-fill page renders at once. Enough that a realistic
+# batch fits on one page, small enough that a pathological one cannot produce an
+# unusable page. What is left stays in the queue and appears on the next visit.
+FILL_PAGE_SIZE = 500
+
+# Questions where every affected record needs its own value, so the queue card
+# offers a row-by-row page instead of pretending one answer will do.
+FILLABLE_REASON_CODES = {"PUSH_REJECTED", "LOGIC_CONTRADICTION"}
+
+
+# Plain-English wrapper around each reason code, for the person answering the
+# question rather than the engineer who named it. "DUPE_AMBIGUOUS" tells a
+# consultant nothing; "two records might be the same person" tells them what
+# they are being asked and what happens either way. Presentation only -- the
+# codes themselves are still emitted solely by app/agent/policy.py.
+REASON_CODE_HELP = {
+    "MAP_AMBIGUOUS": {
+        "title": "A column could belong in more than one place",
+        "means": "A column in the uploaded file matches more than one field in the "
+                 "target system, and the agent will not guess which one.",
+        "approve": "the column is filed under the field shown, for every row in the file",
+        "reject": "the column is left out of the import entirely",
+    },
+    "MAP_UNMAPPED": {
+        "title": "A column has no obvious home",
+        "means": "A column in the uploaded file does not clearly match any field in "
+                 "the target system.",
+        "approve": "the column is filed under the field you pick",
+        "reject": "the column is left out of the import entirely",
+    },
+    "VALUE_LOW_CONFIDENCE": {
+        "title": "A value could not be tidied up confidently",
+        "means": "A value did not match any of the accepted options and the agent is "
+                 "not confident enough to change it on its own.",
+        "approve": "the value is replaced with the one shown, everywhere it appears",
+        "reject": "the value is left exactly as it arrived",
+    },
+    "DATE_FORMAT_AMBIGUOUS": {
+        "title": "A date could be read two different ways",
+        "means": "A date like 03/04/2024 is a different day depending on whether the "
+                 "day or the month comes first, and both readings are valid.",
+        "approve": "every date in that column is read the way shown",
+        "reject": "the dates are left unread and the affected records wait",
+    },
+    "VALIDATE_TWICE": {
+        "title": "A record is still wrong after one attempt to fix it",
+        "means": "The agent tried to correct this record once, and it still does not "
+                 "pass the rules. It will not keep trying.",
+        "approve": "the correction shown is applied to the record",
+        "reject": "the record is held back and not sent to the target system",
+    },
+    "LOGIC_CONTRADICTION": {
+        "title": "A record contradicts itself",
+        "means": "Two fields in the same record cannot both be true — for example a "
+                 "leaving date that falls before the joining date. There is no safe "
+                 "way to guess which one is wrong.",
+        "approve": "the correction shown is applied",
+        "reject": "the record is held back and not sent to the target system",
+    },
+    "DUPE_AMBIGUOUS": {
+        "title": "Two records might be the same person",
+        "means": "Two records look similar enough that they could be one employee "
+                 "entered twice — but similar enough is not the same as certain, and "
+                 "combining two real employees cannot be undone.",
+        "approve": "the two records are combined into one person",
+        "reject": "the two are kept as separate people",
+    },
+    "CONFLICT_ACROSS_SOURCES": {
+        "title": "Your systems disagree with each other",
+        "means": "The same field has different values in different files, so one of "
+                 "them has to be treated as correct.",
+        "approve": "the system you choose wins for that field, now and in future imports",
+        "reject": "the agent falls back to the default order of precedence",
+    },
+    "PUSH_REJECTED": {
+        "title": "The target system refused these records",
+        "means": "The target system applied a rule the agent could not have known "
+                 "about and rejected these employees. Retrying will not help — "
+                 "something has to change first.",
+        "approve": "the correction is saved to the record and sent on the next push",
+        "reject": "these employees are set aside and not sent to the target system",
+    },
+}
+
 # Every status the pipeline can put a record in, in reading order. The overview
 # renders a tile for all of them from the first paint, including the ones still
 # at zero -- otherwise tiles appear one at a time as each status first occurs and
@@ -260,15 +389,24 @@ def _audit_rows(run_id: str, actor: str = "", stage: str = "", reason_code: str 
 ACTIVE_STAGES = {"uploaded", "profiled", "mapped", "cleaned", "validated", "reconciled", "pushing"}
 
 
+def open_question_count(run_id: str) -> int:
+    """Distinct questions still open, which is what the queue shows and what the
+    nav badge must therefore say. Counting escalation rows instead reports 1,210
+    where the consultant sees four."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM escalations "
+            "WHERE run_id = ? AND status = 'open' GROUP BY reason_code, signature)",
+            (run_id,),
+        ).fetchone()["n"]
+
+
 def _run_snapshot(run_id: str) -> dict:
     with connect() as conn:
         run = conn.execute("SELECT stage FROM runs WHERE id = ?", (run_id,)).fetchone()
         records = conn.execute(
             "SELECT status, COUNT(*) AS n FROM records WHERE run_id = ? GROUP BY status", (run_id,)
         ).fetchall()
-        open_escalations = conn.execute(
-            "SELECT COUNT(*) AS n FROM escalations WHERE run_id = ? AND status = 'open'", (run_id,)
-        ).fetchone()["n"]
         pushed = conn.execute(
             "SELECT COUNT(DISTINCT record_id) AS n FROM push_attempts "
             "WHERE run_id = ? AND outcome = 'success'", (run_id,)
@@ -276,7 +414,7 @@ def _run_snapshot(run_id: str) -> dict:
     return {
         "stage": run["stage"] if run else "unknown",
         "records": {r["status"]: r["n"] for r in records},
-        "open_escalations": open_escalations,
+        "open_escalations": open_question_count(run_id),
         "pushed": pushed,
     }
 
@@ -352,6 +490,7 @@ async def view_audit(request: Request, run_id: str, actor: str = "", stage: str 
         request, "audit.html",
         {
             "run_id": run_id, "rows": rows, "total": total, "columns": _AUDIT_COLUMNS,
+            "open_escalations": open_question_count(run_id),
             "actors": actors, "stages": stages,
             "filters": {"actor": actor, "stage": stage,
                         "reason_code": reason_code, "entity_id": entity_id},
@@ -421,7 +560,9 @@ async def view_records(request: Request, run_id: str, q: str = ""):
             "department": data.get("department") or "—",
         })
     return templates.TemplateResponse(
-        request, "records.html", {"run_id": run_id, "records": records, "q": q},
+        request, "records.html",
+        {"run_id": run_id, "records": records, "q": q,
+         "open_escalations": open_question_count(run_id)},
     )
 
 
@@ -440,6 +581,7 @@ async def view_record(request: Request, run_id: str, record_id: str):
         request, "record_detail.html",
         {
             "run_id": run_id, "record_id": record_id,
+            "open_escalations": open_question_count(run_id),
             "record": dict(record) if record else None,
             "data": json.loads(record["data"]) if record else {},
             "survivorship": json.loads(merges[0]["field_survivorship"]) if merges else {},
@@ -453,13 +595,23 @@ async def view_record(request: Request, run_id: str, record_id: str):
 async def start_push(run_id: str):
     schema = load_schema(settings.schema_path)
     policy = load_policy()
-    await run_in_threadpool(push_run, run_id, schema, policy)
+
+    # Pushing thousands of records takes minutes. Awaiting it here held the POST
+    # open for the whole run, so the browser sat on "waiting for localhost" with
+    # no way to tell a slow push from a hung one. It runs in the background and
+    # reports itself through the same progress stream as every other stage.
+    emit(run_id, "stage", "Starting the push to the target system", stage="pushing")
+    _start_background(push_run, run_id, schema, policy)
+
     return RedirectResponse(url=f"/runs/{run_id}/push", status_code=303)
 
 
 @router.post("/runs/{run_id}/rollback")
 async def start_rollback(run_id: str):
-    await run_in_threadpool(rollback_run, run_id)
+    # Same reasoning as the push: a rollback deletes thousands of records over
+    # HTTP and must not hold the browser open while it does.
+    emit(run_id, "stage", "Starting the rollback", stage="pushing")
+    _start_background(rollback_run, run_id)
     return RedirectResponse(url=f"/runs/{run_id}/push", status_code=303)
 
 
@@ -506,8 +658,94 @@ async def view_push(request: Request, run_id: str):
             "failure_rate": round(failure_rate * 100, 1),
             "offer_rollback": failure_rate > policy["push"]["offer_rollback_above_failure_rate"],
             "rollback_threshold": int(policy["push"]["offer_rollback_above_failure_rate"] * 100),
+            "open_escalations": open_question_count(run_id),
+            # The push page streams the same frames as the overview, so it needs
+            # the same two inputs the shared activity component reads.
+            "is_active": (run["stage"] if run else "unknown") == "pushing",
+            "frames": progress.read_frames(run_id, 0, limit=300),
         },
     )
+
+
+def _mapped_column(run_id: str, entity_id: str) -> dict | None:
+    """The column a mapping question is about, with what is actually in it.
+
+    Confidence numbers say how unsure the agent is, not what the column holds --
+    and nobody can decide where 'mgr_code' belongs without seeing a few of its
+    values. The mapping page has always shown them; the card asking the question
+    did not.
+    """
+    if not entity_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT sc.name, sc.sample_values, sc.inferred_type, sc.null_rate,
+                      sc.distinct_count, sf.filename
+               FROM mappings m
+               JOIN source_columns sc ON sc.id = m.source_column_id
+               JOIN source_files sf ON sf.id = sc.source_file_id
+               WHERE m.id = ? AND m.run_id = ?""",
+            (entity_id, run_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "name": row["name"],
+        "filename": row["filename"],
+        "inferred_type": row["inferred_type"],
+        "null_rate": row["null_rate"],
+        "distinct_count": row["distinct_count"],
+        "samples": [str(v) for v in (json.loads(row["sample_values"]) if row["sample_values"] else [])][:8],
+    }
+
+
+def _compared_pair(run_id: str, entity_id: str) -> dict | None:
+    """The two records behind one DUPE_AMBIGUOUS question, side by side.
+
+    A duplicate question is unanswerable as prose -- "are these the same person"
+    only means something once you can see both of them. Fields are shown in one
+    list with each record's value beside the other's, and the ones that differ
+    are marked, because the differences are the entire decision.
+    """
+    if not entity_id or ":" not in entity_id:
+        return None
+    left_id, _, right_id = entity_id.partition(":")
+
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT r.id, r.natural_key, r.data, sf.filename
+               FROM records r JOIN source_files sf ON sf.id = r.source_file_id
+               WHERE r.run_id = ? AND r.id IN (?, ?)""",
+            (run_id, left_id, right_id),
+        ).fetchall()
+
+    by_id = {r["id"]: r for r in rows}
+    left, right = by_id.get(left_id), by_id.get(right_id)
+    if not left or not right:
+        return None
+
+    left_data, right_data = json.loads(left["data"]), json.loads(right["data"])
+    field_names = [f for f in dict.fromkeys([*left_data, *right_data])
+                   if left_data.get(f) not in (None, "") or right_data.get(f) not in (None, "")]
+
+    fields = []
+    for name in field_names:
+        a, b = left_data.get(name), right_data.get(name)
+        fields.append({
+            "name": name,
+            "left": "" if a in (None, "") else a,
+            "right": "" if b in (None, "") else b,
+            "differs": str(a or "") != str(b or ""),
+        })
+
+    return {
+        "left": {"id": left["id"], "label": left["natural_key"] or "no employee id",
+                 "filename": left["filename"]},
+        "right": {"id": right["id"], "label": right["natural_key"] or "no employee id",
+                  "filename": right["filename"]},
+        "fields": fields,
+        "differing": sum(1 for f in fields if f["differs"]),
+    }
 
 
 def _affected_records(run_id: str, reason_code: str, signature: str) -> list[dict]:
@@ -536,6 +774,230 @@ def _affected_records(run_id: str, reason_code: str, signature: str) -> list[dic
     return examples
 
 
+def _per_row_rules(schema):
+    """The rules that can be judged from one record. R6 needs the full id set,
+    which only exists after reconciliation -- the same exclusion validate.py
+    makes, for the same reason."""
+    return [r for r in schema.cross_field_rules if r.id != "R6"]
+
+
+def _fill_targets(run_id: str, escalation_id: str) -> tuple[list[dict], str | None, str, int]:
+    """Every record behind one question, with the field they are all missing."""
+    with connect() as conn:
+        anchor = conn.execute(
+            "SELECT reason_code, signature, question, context FROM escalations "
+            "WHERE id = ? AND run_id = ?", (escalation_id, run_id),
+        ).fetchone()
+        if anchor is None:
+            return [], None, "", 0
+
+        context = json.loads(anchor["context"]) if anchor["context"] else {}
+        field = context.get("repair_field")
+        if not field:
+            return [], None, "", 0
+
+        rows = conn.execute(
+            """SELECT e.id AS escalation_id, r.id AS record_id, r.natural_key, r.data,
+                      e.suggested_value,
+                      json_extract(e.context, '$.employee_id') AS employee_id
+               FROM escalations e JOIN records r ON r.id = e.entity_id
+               WHERE e.run_id = ? AND e.reason_code = ? AND e.signature = ? AND e.status = 'open'
+               ORDER BY r.natural_key
+               LIMIT ?""",
+            (run_id, anchor["reason_code"], anchor["signature"], FILL_PAGE_SIZE),
+        ).fetchall()
+
+        remaining = conn.execute(
+            """SELECT COUNT(*) AS n FROM escalations
+               WHERE run_id = ? AND reason_code = ? AND signature = ? AND status = 'open'""",
+            (run_id, anchor["reason_code"], anchor["signature"]),
+        ).fetchone()["n"]
+
+    out = []
+    for row in rows:
+        data = json.loads(row["data"])
+        out.append({
+            "escalation_id": row["escalation_id"],
+            "record_id": row["record_id"],
+            "employee_id": row["employee_id"] or row["natural_key"] or "",
+            "name": " ".join(x for x in (data.get("first_name"), data.get("last_name")) if x),
+            "current": data.get(field) or "",
+            "proposed": row["suggested_value"] or "",
+        })
+    return out, field, anchor["question"], remaining
+
+
+def _apply_filled_values(run_id: str, field: str, rows: list[dict],
+                         supplied: dict[str, str], schema,
+                         note: str = "") -> tuple[int, list[dict]]:
+    """Validates and applies one value per record. Returns (applied, rejected).
+
+    Each value is checked by building the whole record with it and running the
+    same strict model the push uses, so anything accepted here is something the
+    target will accept -- rather than discovering it was wrong on the next push.
+    """
+    strict_model = build_model(schema, require_all=True)
+    by_escalation = {r["escalation_id"]: r for r in rows}
+    applied, rejected = 0, []
+
+    for escalation_id, value in supplied.items():
+        row = by_escalation.get(escalation_id)
+        if row is None or not value:
+            continue
+
+        with connect() as conn:
+            record = conn.execute("SELECT data, status FROM records WHERE id = ?",
+                                  (row["record_id"],)).fetchone()
+            if record is None:
+                continue
+            data = json.loads(record["data"])
+            try:
+                cleaned = strict_model(**{**data, field: value})
+            except ValidationError as exc:
+                rejected.append({
+                    "employee_id": row["employee_id"],
+                    "value": value,
+                    "why": exc.errors()[0].get("msg", "not a valid value for this field"),
+                })
+                continue
+
+            # Field validation is not the whole bar. A record blocked by a
+            # cross-field rule is only fixed when the rule passes, and correcting
+            # one field can leave another rule broken -- so the same rules the
+            # pipeline runs are run again here. Unblocking on the strict model
+            # alone would hand the push a record it still has to refuse.
+            # From the validated model, not the stored JSON: the rules compare
+            # dates, and everything in the record's JSON is a string. Passing
+            # those straight in raised a TypeError instead of failing the rule.
+            broken = evaluate_rules(cleaned.model_dump(), _per_row_rules(schema), RuleContext())
+            if broken:
+                rejected.append({
+                    "employee_id": row["employee_id"],
+                    "value": value,
+                    "why": "still breaks " + ", ".join(
+                        RULE_DESCRIPTIONS.get(rule_id, rule_id) for rule_id in broken),
+                })
+                continue
+
+            before = data.get(field)
+            data[field] = str(getattr(cleaned, field))
+            # A record that was held back is now genuinely clean: it passed the
+            # field model and every per-row rule above. One that was already
+            # pushable keeps the status it had -- a merge survivor stays one.
+            restored = ("clean" if record["status"] in ("excluded", "blocked", "incomplete")
+                        else record["status"])
+            conn.execute(
+                "UPDATE records SET data = ?, status = ?, blocked_on = NULL, updated_at = ? WHERE id = ?",
+                (json.dumps(data, default=str), restored, utcnow(), row["record_id"]),
+            )
+            record_change(
+                conn, run_id=run_id, actor="human", stage="pushed",
+                reason_code="PUSH_REJECTED", entity_type="record", entity_id=row["record_id"],
+                field=field, before=str(before or ""), after=data[field],
+                note=note or "corrected by a person; the agent had no safe automatic fix",
+            )
+            conn.execute(
+                "UPDATE escalations SET status = 'resolved', resolved_at = ? WHERE id = ?",
+                (utcnow(), escalation_id),
+            )
+            applied += 1
+
+    return applied, rejected
+
+
+@router.get("/runs/{run_id}/escalations/{escalation_id}/fill")
+async def fill_form(request: Request, run_id: str, escalation_id: str):
+    """One value per record, for a question no single answer can settle.
+
+    Most escalations compress: one answer closes every case. A missing value does
+    not, because each record needs a *different* value that only a person has.
+    Asking for them one card at a time would be hundreds of clicks, and a single
+    text box cannot express hundreds of different answers -- so this is the one
+    place the UI stops being a queue and becomes a spreadsheet.
+    """
+    schema = load_schema(settings.schema_path)
+    rows, field, question, remaining = _fill_targets(run_id, escalation_id)
+    if field is None:
+        return RedirectResponse(url=f"/runs/{run_id}/queue", status_code=303)
+
+    return templates.TemplateResponse(
+        request, "fill.html",
+        {
+            "run_id": run_id, "escalation_id": escalation_id,
+            "field": field, "field_spec": schema.fields.get(field),
+            "question": question, "rows": rows, "remaining": remaining,
+            "open_escalations": open_question_count(run_id),
+        },
+    )
+
+
+@router.post("/runs/{run_id}/escalations/{escalation_id}/fill")
+async def fill_submit(request: Request, run_id: str, escalation_id: str):
+    schema = load_schema(settings.schema_path)
+    rows, field, question, remaining = _fill_targets(run_id, escalation_id)
+    if field is None:
+        return RedirectResponse(url=f"/runs/{run_id}/queue", status_code=303)
+
+    form = await request.form()
+    action = form.get("action") or "save"
+
+    # Reading an instruction back before acting on it is the whole point: the
+    # consultant sees what was understood and how many records it touches, and
+    # nothing is written until they say go.
+    instruction = (form.get("instruction") or "").strip()
+
+    # The instruction fills the form in; it does not write anything. Every row
+    # comes back populated and editable, so what is about to be saved is on
+    # screen as rows rather than described in a sentence -- and one row can still
+    # be corrected before saving, which an "apply to all" button cannot offer.
+    if action == "interpret":
+        plan, why_not = interpret_bulk_instruction(instruction, field, remaining, schema)
+        return templates.TemplateResponse(
+            request, "fill.html",
+            {
+                "run_id": run_id, "escalation_id": escalation_id,
+                "field": field, "field_spec": schema.fields.get(field),
+                "question": question, "rows": rows, "remaining": remaining,
+                "plan": plan, "plan_refused": why_not, "instruction": instruction,
+                "prefill": plan["value"] if plan else "",
+                "open_escalations": open_question_count(run_id),
+            },
+        )
+
+    supplied = {r["escalation_id"]: (form.get(f"value-{r['escalation_id']}") or "").strip()
+                for r in rows}
+
+    # A pasted "employee_id,value" block is the realistic path: the consultant
+    # has this in a spreadsheet, not in their head. It fills any row it names
+    # that the per-row inputs left blank.
+    by_employee = {r["employee_id"]: r["escalation_id"] for r in rows if r["employee_id"]}
+    for line in (form.get("pasted") or "").splitlines():
+        parts = [p.strip() for p in re.split(r"[,\t;]", line, maxsplit=1)]
+        if len(parts) != 2 or not parts[1]:
+            continue
+        escalation_for_employee = by_employee.get(parts[0])
+        if escalation_for_employee and not supplied.get(escalation_for_employee):
+            supplied[escalation_for_employee] = parts[1]
+
+    note = (f"set in bulk on the consultant instruction: {instruction}"
+            if instruction else "")
+    applied, rejected = _apply_filled_values(run_id, field, rows, supplied, schema, note=note)
+
+    if rejected:
+        rows_after, _f, question_after, remaining_after = _fill_targets(run_id, escalation_id)
+        return templates.TemplateResponse(
+            request, "fill.html",
+            {
+                "run_id": run_id, "escalation_id": escalation_id,
+                "field": field, "field_spec": schema.fields.get(field),
+                "question": question_after, "rows": rows_after, "remaining": remaining_after,
+                "applied": applied, "rejected": rejected,
+                "open_escalations": open_question_count(run_id),
+            },
+        )
+    return RedirectResponse(url=f"/runs/{run_id}/queue", status_code=303)
+
+
 @router.get("/runs/{run_id}/queue")
 async def view_queue(request: Request, run_id: str):
     schema = load_schema(settings.schema_path)
@@ -547,6 +1009,11 @@ async def view_queue(request: Request, run_id: str):
                       MIN(question) AS question, MIN(evidence) AS evidence,
                       MIN(suggested_action) AS suggested_action,
                       MIN(suggested_value) AS suggested_value, MIN(options) AS options,
+                      -- Extracted rather than taking MIN over the whole JSON:
+                      -- context differs per row (each carries its own payload),
+                      -- so MIN(context) picked an arbitrary row and lost the
+                      -- field whenever that row happened not to have one.
+                      MAX(json_extract(context, '$.repair_field')) AS repair_field,
                       COUNT(*) AS similar_count, SUM(affected_count) AS rows_affected
                FROM escalations
                WHERE run_id = ? AND status = 'open'
@@ -566,7 +1033,24 @@ async def view_queue(request: Request, run_id: str):
         if len(group["cards"]) < CARDS_PER_REASON_CODE:
             card = dict(r)
             card["options"] = json.loads(card["options"]) if card["options"] else []
-            card["examples"] = _affected_records(run_id, r["reason_code"], r["signature"])
+            # A duplicate question needs both records; everything else needs the
+            # one it is about.
+            card["pair"] = (_compared_pair(run_id, r["entity_id"])
+                            if r["reason_code"] == "DUPE_AMBIGUOUS" else None)
+            # Any refusal whose field is known can be worked through row by row.
+            # That is the only honest view when one refusal covers many different
+            # offending values -- 102 misspelled job titles share a question but
+            # not a correction, and a single text box cannot say that.
+            # Codes whose answer differs per record. The rest are left alone on
+            # purpose: one target field for a column, one truth ordering for a
+            # disagreement, one reading for a date column -- those genuinely do
+            # have a single answer, and a row-by-row page would imply otherwise.
+            card["column"] = (_mapped_column(run_id, r["entity_id"])
+                              if r["reason_code"] in ("MAP_AMBIGUOUS", "MAP_UNMAPPED") else None)
+            card["fill_field"] = (r["repair_field"]
+                                  if r["reason_code"] in FILLABLE_REASON_CODES else None)
+            card["examples"] = ([] if card["pair"]
+                                else _affected_records(run_id, r["reason_code"], r["signature"]))
             group["cards"].append(card)
 
     return templates.TemplateResponse(
@@ -575,9 +1059,10 @@ async def view_queue(request: Request, run_id: str):
             "run_id": run_id,
             "groups": groups,
             "resolved_count": resolved_count,
-            "open_escalations": sum(g["total"] for g in groups.values()),
+            "open_escalations": open_question_count(run_id),
             "target_fields": list(schema.fields),
             "cards_per_code": CARDS_PER_REASON_CODE,
+            "help": REASON_CODE_HELP,
         },
     )
 
@@ -636,12 +1121,6 @@ async def run_summary(request: Request, run_id: str):
         merge_count = conn.execute(
             "SELECT COUNT(*) AS n FROM merges WHERE run_id = ?", (run_id,)
         ).fetchone()["n"]
-        # Distinct questions, not escalation rows: the nav badge should say how
-        # many things need answering, which is what the queue actually shows.
-        open_questions = conn.execute(
-            "SELECT COUNT(*) AS n FROM (SELECT 1 FROM escalations WHERE run_id = ? "
-            "AND status = 'open' GROUP BY reason_code, signature)", (run_id,)
-        ).fetchone()["n"]
 
     return templates.TemplateResponse(
         request, "run_summary.html",
@@ -653,7 +1132,7 @@ async def run_summary(request: Request, run_id: str):
             "merge_count": merge_count,
             "is_active": (run["stage"] if run else "unknown") in ACTIVE_STAGES,
             "status": run_status(run_id),
-            "open_escalations": open_questions,
+            "open_escalations": open_question_count(run_id),
             # Rendered server-side so the page is correct before any stream
             # connects, and so it still works with JavaScript off.
             "frames": progress.read_frames(run_id, 0, limit=300),

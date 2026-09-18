@@ -31,7 +31,7 @@ import csv
 import json
 import random
 from collections import deque
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -182,7 +182,7 @@ def build_canonical(i: int, rng: random.Random, fake: Faker, all_ids: list[str])
     term_date = None
     if status == "terminated":
         term_date = hire_date + timedelta(days=rng.randint(30, 2000))
-        term_date = min(term_date, date.today())
+        term_date = min(term_date, datetime.now(UTC).date())
 
     manager_id = None if i < 5 or not all_ids else rng.choice(all_ids)
 
@@ -257,7 +257,12 @@ def corrupt_hris_row(row: dict, rec: dict, rng: random.Random, log: AnomalyLog, 
         log.note_eligible("epoch_timestamp_date")
         if rng.random() < spec("epoch_timestamp_date") and "term_date" not in touched:
             log.record("epoch_timestamp_date", row["emp_code"], row["term_date"])
-            epoch = int(datetime(rec["termination_date"].year, rec["termination_date"].month, rec["termination_date"].day).timestamp())
+            # Anchored to UTC on purpose. A naive datetime here is interpreted
+            # in the generating machine's local zone, so the same seed produced
+            # different epoch values in different timezones and the "same" sample
+            # data was not actually the same.
+            epoch = int(datetime(rec["termination_date"].year, rec["termination_date"].month,
+                                 rec["termination_date"].day, tzinfo=UTC).timestamp())
             row["term_date"] = str(epoch)
             touched.add("term_date")
 
@@ -373,7 +378,7 @@ def main() -> None:
         wb = openpyxl.Workbook(write_only=True)
         ws = wb.create_sheet("Contacts")
         ws.append(["Meridian Logistics -- CRM Contact Export (Confidential)"])
-        ws.append([f"Generated {datetime.now():%Y-%m-%d %H:%M}"])
+        ws.append([f"Generated {datetime.now(UTC):%Y-%m-%d %H:%M} UTC"])
         ws.append(["Full Name", "Email", "Mobile", "Date of Joining", "Department", "Designation"])
 
         for i in range(args.rows):
@@ -419,7 +424,7 @@ def main() -> None:
     manifest = {
         "seed": args.seed,
         "rows_requested": args.rows,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "employer": {"name": "Meridian Logistics", "domain": DOMAIN},
         "files": {
             "legacy_hris_employees.csv": {"row_count": hris_row_count},

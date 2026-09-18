@@ -248,7 +248,7 @@ h2 { font-size: 21px; font-weight: 520; color: var(--ink-hi); letter-spacing: -.
 /* -- 09 · forms ----------------------------------------------- */
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > label { font-size: 12.5px; font-weight: 510; color: var(--ink-hi); letter-spacing: .01em; }
-.field .help { font-size: 12px; color: var(--ink-low); }
+.field .help { font-size: 12px; color: var(--ink-low); margin-bottom: 1rem;}
 .field .error { font-size: 12px; color: var(--rose); }
 .field input[type="text"], .field input[type="email"], .field input[type="password"], .field input[type="number"], .field input[type="url"] {
   background: var(--glass-2); border: 1px solid var(--hairline); border-radius: var(--r-full); padding: 9px 16px;
@@ -449,7 +449,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 /* brand lockup */
 .brand { display: flex; align-items: center; gap: 10px; color: var(--ink-hi); font-weight: 560; letter-spacing: .01em; text-decoration: none; }
 .brand .orb { width: 26px; height: 26px; border-radius: 50%; background: radial-gradient(circle at 62% 38%, var(--accent) 0 44%, transparent 45%), radial-gradient(circle at 40% 60%, var(--accent-deep), #23234d 70%); box-shadow: 0 0 18px var(--accent-glow); flex: none; }
-.brand small { display: block; font-size: 11px; font-weight: 420; color: var(--ink-low); letter-spacing: .14em; text-transform: uppercase; }
+.brand small { display: block; font-size: 11px; font-weight: 420; color: var(--ink-low); letter-spacing: .14em; }
 .rail .brand { margin-bottom: 14px; }
 
 /* app shell: sidebar + topbar + main */

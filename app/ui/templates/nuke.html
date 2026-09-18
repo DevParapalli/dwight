@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set nav_page = 'runs' %}
+{% block title %}Clear all data · dwight{% endblock %}
+{% block topbar %}<span class="t-data">testing tool</span>{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">( <b>CLEAR ALL DATA</b> )</div>
+    <h1>This deletes <em class="serif-em">everything</em>.</h1>
+    <div class="when">A testing tool, so you can start a run from nothing. It cannot be undone.</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="callout"><span aria-hidden="true">!</span><span>
+    <b>Both systems are cleared.</b>
+    <span>This app's database and the target system's own store. Employees already
+    pushed to the target are deleted there too.</span>
+  </span></div>
+
+  <dl class="xoutcomes" style="margin-top:14px">
+    {% for label, n in counts.items() %}
+    <div><dt>{{ label }}</dt><dd>{{ "{:,}".format(n) }} deleted</dd></div>
+    {% endfor %}
+    <div><dt>kept</dt><dd>The model cache, so the next run does not pay for the same answers twice.</dd></div>
+  </dl>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
+    <form method="post" action="/nuke">
+      <button class="btn btn-danger" type="submit">Yes, clear everything</button>
+    </form>
+    <a class="btn btn-glass" href="/runs">Cancel</a>
+  </div>
+</div>
+
+{% endblock %}

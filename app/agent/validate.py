@@ -49,12 +49,14 @@ def _clean_enum_field(f: SchemaField, raw_value, policy: dict, normalization_map
 
     llm_result = (normalization_map or {}).get(s)
     if llm_result is None:
-        decision = decide_enum_coercion(f.name, s, edit_distance, policy, nearest)
+        decision = decide_enum_coercion(f.name, s, edit_distance, policy, nearest,
+                                        allowed_values=f.values)
         if decision.reason_code:
             issues.append(Issue(decision, f.name))
         return None, issues
 
-    decision = decide_llm_normalization(f.name, s, llm_result["confidence"], policy, llm_result.get("value"))
+    decision = decide_llm_normalization(f.name, s, llm_result["confidence"], policy,
+                                        llm_result.get("value"), allowed_values=f.values)
     if decision.reason_code:
         issues.append(Issue(decision, f.name))
         return None, issues
@@ -65,7 +67,7 @@ def _clean_date_field(f: SchemaField, raw_value, filename: str, policy: dict) ->
     issues: list[Issue] = []
     parsed, ambiguous = parse_date_value(raw_value, policy["dates"]["accepted_formats"])
     if ambiguous:
-        decision = decide_date(f.name, filename, True, policy)
+        decision = decide_date(f.name, filename, True, policy, raw_value=str(raw_value or ""))
         if decision.reason_code:
             issues.append(Issue(decision, f.name))
     return parsed, issues

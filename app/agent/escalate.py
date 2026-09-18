@@ -54,11 +54,12 @@ def create_or_merge_escalation(conn, run_id: str, decision: PolicyDecision, enti
     conn.execute(
         """INSERT INTO escalations
            (id, run_id, reason_code, scope, signature, entity_id, question, evidence,
-            affected_count, suggested_action, suggested_value, options, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'open', ?)""",
+            affected_count, suggested_action, suggested_value, options, context, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'open', ?)""",
         (escalation_id, run_id, decision.reason_code, REASON_CODE_SCOPE[decision.reason_code], sig, entity_id,
          decision.question, decision.evidence, decision.suggested_action,
          decision.suggested_value, json.dumps(decision.options) if decision.options else None,
+         json.dumps(decision.context) if decision.context else None,
          utcnow()),
     )
     return escalation_id

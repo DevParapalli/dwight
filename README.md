@@ -49,7 +49,6 @@ The agent is designed to satisfy the assignment acceptance criteria:
 - `policy/` — escalation thresholds and rules
 - `tools/` — sample data generator and target API mock
 - `data/samples/` — generated source files for local demos
-- `docs/` — the assignment brief, deep-dive notes, write-up, and demo guidance
 
 ## Quick start
 

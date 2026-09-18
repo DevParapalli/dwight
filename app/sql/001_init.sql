@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS escalations (
     question TEXT NOT NULL,
     suggested_value TEXT,
     options TEXT,
+    -- JSON: what the target refused and the payload it refused, so a rejection
+    -- can be reasoned about after the fact without replaying the push.
+    context TEXT,
     evidence TEXT,
     affected_count INTEGER NOT NULL DEFAULT 0,
     suggested_action TEXT,

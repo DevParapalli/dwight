@@ -2,6 +2,7 @@ import json
 from collections import defaultdict
 
 from app.agent.dedupe import blocking_key, similarity_score
+from app.agent.dupe_llm import judge_pair
 from app.agent.escalate import create_or_merge_escalation
 from app.agent.policy import (
     Issue,
@@ -134,6 +135,36 @@ def _survivorship(cluster: list[dict], schema: Schema, policy: dict,
     return merged, survivorship, issues
 
 
+def _judge_band_pairs(run_id: str, records: dict, band_pairs: list[tuple], policy: dict) -> dict:
+    """Asks the model about each too-close-to-call pair, before a person sees it.
+
+    Returns {pair_id: judgement}. An empty result simply means every pair goes to
+    a person, which is the behaviour this had before the model was involved --
+    so a missing key, a refusing provider or a nonsense answer all degrade to
+    asking rather than to guessing.
+    """
+    if not band_pairs:
+        return {}
+
+    cap = policy["dedupe"]["llm_judge_max_pairs"]
+    if len(band_pairs) > cap:
+        emit(run_id, "progress",
+             f"{len(band_pairs):,} close pairs is more than the {cap} the agent will "
+             "review one by one, so all of them go to a person",
+             stage="reconciled", what="dupe_judge_skipped", pairs=len(band_pairs))
+        return {}
+
+    emit(run_id, "progress", f"Reviewing {len(band_pairs):,} close pair(s) before asking anyone",
+         stage="reconciled", what="dupe_judge", pairs=len(band_pairs))
+
+    judgements = {}
+    for a_id, b_id, _score in band_pairs:
+        judgement = judge_pair(records[a_id]["data"], records[b_id]["data"], run_id=run_id)
+        if judgement:
+            judgements[f"{a_id}:{b_id}"] = judgement
+    return judgements
+
+
 def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
     """Clusters records by natural_key (exact -- this alone correlates HRIS with
     payroll, since they deliberately share employee_id, and catches HRIS's own
@@ -194,6 +225,8 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
 
     dupe_pairs_evaluated: set[tuple[str, str]] = set()
     ambiguous_pairs: list[tuple] = []
+    band_pairs: list[tuple] = []
+    auto_separated: list[tuple] = []
     for bucket in blocks.values():
         for i in range(len(bucket)):
             for j in range(i + 1, len(bucket)):
@@ -218,18 +251,53 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
                         uf.union(a_id, b_id)
                     continue
 
-                decision = decide_dupe_ambiguous(
+                # Ask the policy whether this pair is even a question. Only the
+                # ones inside the escalate band are worth a model call, and the
+                # band belongs to policy.py, not here. The model call itself is
+                # deferred: this loop is O(n^2) and must not make a network
+                # request per pair.
+                if decide_dupe_ambiguous(
                     _identity(records[a_id]), _identity(records[b_id]), score, policy
-                )
-                if decision.reason_code:
-                    ambiguous_pairs.append((decision, f"{a_id}:{b_id}"))
+                ).reason_code:
+                    band_pairs.append((a_id, b_id, score))
+
+    judgements = _judge_band_pairs(run_id, records, band_pairs, policy)
+
+    separated = 0
+    for a_id, b_id, score in band_pairs:
+        judgement = judgements.get(f"{a_id}:{b_id}")
+        decision = decide_dupe_ambiguous(
+            _identity(records[a_id]), _identity(records[b_id]), score, policy, judgement
+        )
+        if decision.reason_code:
+            ambiguous_pairs.append((decision, f"{a_id}:{b_id}", judgement))
+        elif judgement:
+            separated += 1
+            auto_separated.append((a_id, b_id, score, judgement))
 
     # Written once, after scoring every pair, rather than opening a connection
     # per pair inside the O(blocks * block_size^2) loop above.
-    if ambiguous_pairs:
+    if ambiguous_pairs or auto_separated:
         with connect() as conn:
-            for decision, pair_id in ambiguous_pairs:
+            for decision, pair_id, _ in ambiguous_pairs:
                 create_or_merge_escalation(conn, run_id, decision, entity_id=pair_id)
+            for a_id, b_id, score, judgement in auto_separated:
+                # Not asking is still a decision, so it is on the record with
+                # the reason and the confidence that produced it.
+                record_change(
+                    conn, run_id=run_id, actor="llm", stage="reconciled",
+                    reason_code="DUPE_AMBIGUOUS", entity_type="record", entity_id=a_id,
+                    field="duplicate_of", before=b_id, after="kept separate",
+                    confidence=judgement.get("confidence"),
+                    note=(f"similarity {score:.2f} was inside the escalate band; the model "
+                          f"judged these different people and they were left unmerged "
+                          f"without asking -- {judgement.get('rationale', '')}"),
+                )
+
+    if separated:
+        emit(run_id, "progress",
+             f"{separated:,} close pair(s) confirmed as different people, not asked about",
+             stage="reconciled", what="dupe_auto", pairs=separated)
 
     if ambiguous_pairs:
         emit(run_id, "escalation",
@@ -279,6 +347,16 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
             )
             for issue in issues:
                 create_or_merge_escalation(conn, run_id, issue.decision, entity_id=survivor["id"])
+                # A class-scoped escalation carries one example record, so on its
+                # own it cannot say which employees it covers. Each occurrence
+                # gets its own audit row so the affected people are recoverable
+                # -- for the card that lists them, and for measuring recall.
+                record_change(
+                    conn, run_id=run_id, actor="agent", stage="reconciled",
+                    reason_code=issue.decision.reason_code, entity_type="record",
+                    entity_id=survivor["id"], field=issue.field,
+                    note=f"escalated: {issue.decision.scope_key}",
+                )
 
         conn.execute("UPDATE runs SET stage = 'reconciled', updated_at = ? WHERE id = ?", (utcnow(), run_id))
 

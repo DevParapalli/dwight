@@ -56,31 +56,7 @@
         <h3>What the agent is doing</h3>
         <p id="activity-sub">Every step, in order, as it happens.</p>
       </header>
-      <ol class="activity" id="activity" aria-live="polite" aria-relevant="additions">
-        {% for f in frames %}
-        <li class="act act-{{ f.kind }}">
-          <span class="act-time">{{ f.ts[11:19] }}</span>
-          <span class="act-dot" aria-hidden="true"></span>
-          <span class="act-msg">{{ f.message }}</span>
-          {% if f.detail.get('total') %}<span class="chip-f">{{ f.detail.done }}/{{ f.detail.total }}</span>{% endif %}
-        </li>
-        {% else %}
-        {# A working run with no frames yet is about to have some, so hold the
-           shape rather than showing an empty box that then grows a row at a
-           time. aria-hidden because there is nothing here to read out. #}
-        {% if is_active %}
-        {% for _ in range(6) %}
-        <li class="act act-idle" aria-hidden="true">
-          <span class="act-time skel" style="height:11px"></span>
-          <span class="act-dot"></span>
-          <span class="act-msg skel skel-line {{ ['w-90','w-60','w-75','w-40'][loop.index0 % 4] }}"></span>
-        </li>
-        {% endfor %}
-        {% else %}
-        <li class="act act-idle"><span class="act-msg">No activity recorded yet.</span></li>
-        {% endif %}
-        {% endfor %}
-      </ol>
+      {% include "_activity.html" %}
     </section>
   </div>
 
@@ -128,83 +104,17 @@
   </div>
 </div>
 
-{# Cloned per frame by the stream. Keeping the markup here rather than building
-   strings in JS means the live rows are the same markup the server renders. #}
-<template id="frame-template">
-  <li class="act">
-    <span class="act-time"></span>
-    <span class="act-dot" aria-hidden="true"></span>
-    <span class="act-msg"></span>
-    <span class="chip-f" hidden></span>
-  </li>
-</template>
 
-<style>
-  .activity { list-style:none; margin:0; padding:0; max-height:52vh; overflow-y:auto; }
-  .act { display:flex; align-items:baseline; gap:10px; padding:7px 2px;
-         border-bottom:1px solid var(--hairline-soft); }
-  .act:last-child { border-bottom:0; }
-  .act-time { font-family:var(--font-mono); font-size:11px; color:var(--ink-low);
-              flex:0 0 auto; min-width:58px; }
-  .act-dot { width:5px; height:5px; border-radius:var(--r-full); flex:0 0 auto;
-             background:var(--ink-low); }
-  .act-stage .act-dot { background:var(--accent); }
-  .act-escalation .act-dot { background:var(--amber); }
-  .act-waiting .act-dot { background:var(--amber); }
-  .act-finished .act-dot { background:var(--mint); }
-  .act-msg { color:var(--ink-mid); font-size:13.5px; flex:1 1 auto; }
-  .act-stage .act-msg { color:var(--ink-hi); }
-  .act-new { animation:actin .25s ease-out; }
-  @keyframes actin { from { opacity:0; transform:translateY(-3px); } to { opacity:1; transform:none; } }
-  @media (prefers-reduced-motion:reduce) { .act-new { animation:none; } }
-</style>
 
 <script>
+  // Only the overview reacts to the snapshot; the shared feed calls this hook.
   (function () {
-    if (!window.EventSource) { return; }   // <noscript> refresh already covers this
-
-    var list = document.getElementById('activity');
-    var tpl = document.getElementById('frame-template');
-    var pill = document.getElementById('live-pill');
-    var liveWord = document.getElementById('live-word');
     var doing = document.getElementById('doing');
     var stageWord = document.getElementById('stage-word');
-    var headline = document.getElementById('headline');
     var counters = document.getElementById('counters');
-    var seen = Object.create(null);
     var lastStage = {{ stage | tojson }};
 
-    // The server already rendered every frame it had. Record those ids so the
-    // replay on connect doesn't draw them a second time.
-    {% for f in frames %}seen[{{ f.seq }}] = 1;{% endfor %}
-
-    if (pill) { pill.hidden = false; }
-
-    function addFrame(frame) {
-      if (seen[frame.seq]) { return; }
-      seen[frame.seq] = 1;
-
-      // Every placeholder goes on the first real frame, not one per frame.
-      var idle = list.querySelectorAll('.act-idle');
-      for (var i = 0; i < idle.length; i++) { idle[i].remove(); }
-
-      var node = tpl.content.firstElementChild.cloneNode(true);
-      node.classList.add('act-' + frame.kind, 'act-new');
-      node.querySelector('.act-time').textContent = (frame.ts || '').slice(11, 19);
-      node.querySelector('.act-msg').textContent = frame.message;
-
-      var chip = node.querySelector('.chip-f');
-      if (frame.detail && frame.detail.total) {
-        chip.textContent = frame.detail.done + '/' + frame.detail.total;
-        chip.hidden = false;
-      }
-
-      list.appendChild(node);
-      list.scrollTop = list.scrollHeight;
-      if (doing) { doing.textContent = frame.message; }
-    }
-
-    function applySnapshot(s) {
+    window.dwightOnSnapshot = function (s) {
       if (stageWord) { stageWord.textContent = (s.stage || '').toUpperCase(); }
 
       Object.keys(s.records).forEach(function (status) {
@@ -216,22 +126,11 @@
       // stale. Reload once, quietly, instead of re-implementing that logic here.
       if (s.stage !== lastStage) {
         lastStage = s.stage;
+        if (doing) { doing.textContent = 'Moving to ' + s.stage + '.'; }
         if (['reconciled', 'mapped', 'done', 'rolled_back'].indexOf(s.stage) !== -1) {
           window.setTimeout(function () { window.location.reload(); }, 900);
         }
       }
-    }
-
-    var source = new EventSource('/runs/{{ run_id }}/events');
-
-    source.addEventListener('frame', function (e) { addFrame(JSON.parse(e.data)); });
-    source.addEventListener('snapshot', function (e) { applySnapshot(JSON.parse(e.data)); });
-
-    source.onopen = function () { if (liveWord) { liveWord.textContent = 'live'; } };
-    source.onerror = function () {
-      // EventSource reconnects by itself and sends Last-Event-ID, so the stream
-      // resumes from the last frame drawn rather than replaying everything.
-      if (liveWord) { liveWord.textContent = 'reconnecting'; }
     };
   })();
 </script>

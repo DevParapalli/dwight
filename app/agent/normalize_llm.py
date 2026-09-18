@@ -3,8 +3,9 @@ import json
 from datetime import UTC, datetime
 
 from app.db import connect, new_id
-from app.llm.client import LLMNotConfigured, complete_json
+from app.llm.client import LLMNotConfigured, active_model, complete_json_reported
 from app.llm.prompts import build_value_normalization_prompt
+from app.progress import emit
 from app.settings import settings
 
 
@@ -30,7 +31,7 @@ def _get_cached(field_name: str, raw_value: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
             "SELECT response FROM llm_cache WHERE model = ? AND prompt_hash = ?",
-            (settings.groq_model, _cache_key(field_name, raw_value)),
+            (active_model(), _cache_key(field_name, raw_value)),
         ).fetchone()
     return json.loads(row["response"]) if row else None
 
@@ -40,12 +41,13 @@ def _store_cached(field_name: str, raw_value: str, result: dict) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO llm_cache (id, model, prompt_hash, response, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (new_id(), settings.groq_model, _cache_key(field_name, raw_value),
+            (new_id(), active_model(), _cache_key(field_name, raw_value),
              json.dumps(result), datetime.now(UTC).isoformat()),
         )
 
 
-def normalize_values(field_name: str, allowed_values: list[str], raw_values: list[str]) -> dict[str, dict]:
+def normalize_values(field_name: str, allowed_values: list[str], raw_values: list[str],
+                     run_id: str | None = None) -> dict[str, dict]:
     """Normalizes distinct raw values for one enum field against the allowed set.
     Cached per (field, raw_value) so the same question is never re-asked; batches
     whatever isn't cached into provider-sized batches per LLM call."""
@@ -58,12 +60,27 @@ def normalize_values(field_name: str, allowed_values: list[str], raw_values: lis
         else:
             unresolved.append(v)
 
+    if run_id and len(results) and not unresolved:
+        emit(run_id, "llm", f"{field_name}: all {len(results)} value(s) answered from cache",
+             stage="cleaned", what="value normalisation", field=field_name, cached=True)
+
     batch_size = _batch_size()
     for i in range(0, len(unresolved), batch_size):
         batch = unresolved[i:i + batch_size]
+        if run_id:
+            emit(run_id, "llm",
+                 f"Asking {active_model()} to classify {len(batch)} unrecognised "
+                 f"{field_name} value(s): {', '.join(repr(b) for b in batch[:3])}"
+                 + ("..." if len(batch) > 3 else ""),
+                 stage="cleaned", what="value normalisation", model=active_model(),
+                 field=field_name, batch=len(batch), cached=False)
         try:
             system_prompt, user_prompt = build_value_normalization_prompt(field_name, allowed_values, batch)
-            response, _latency_ms = complete_json(system_prompt, user_prompt)
+            response, _latency_ms, _served_by = complete_json_reported(
+                system_prompt, user_prompt,
+                report=(lambda kind, message: emit(run_id, kind, message, stage="cleaned",
+                                                   model=active_model(), field=field_name))
+                if run_id else None)
         except LLMNotConfigured:
             # Not cached: this is an absence of capability, not a judgment. Once
             # an LLM is configured these values must be tried again, not treated
