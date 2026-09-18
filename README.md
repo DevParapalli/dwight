@@ -1,74 +1,74 @@
-# dwight
+# Dwight
 
-A small prototype for a migration-assistant challenge: a system that ingests messy employee exports, maps them to a target schema, cleans and validates the records, escalates only the genuinely ambiguous cases, and pushes the approved result to a mock target API.
+## Escalate classes, not instances
 
-## The challenge
+Dwight is an agentic migration assistant for moving employee data from a
+fragmented legacy HR/CRM/payroll stack into a target HR platform. It ingests
+inconsistent exports, proposes a schema mapping, cleans and reconciles the
+records, validates them, and pushes approved data to a separate mock target
+API.
 
-The goal is not to hard-code a transformation for one CSV, but to show a practical agent boundary:
+The important design choice is the escalation boundary. The agent handles
+routine, reversible work itself. It asks a human only when a wrong guess
+would be silent or difficult to undo: ambiguous mappings, ambiguous dates,
+material disagreements between sources, unsafe repairs, validation
+contradictions, and approval to write to the target.
 
-- the agent should handle routine migration work autonomously,
-- it should ask for help only when ambiguity is real,
-- a human should be able to review, correct, and approve the final push through a simple UI.
+## What it demonstrates
 
-## What the prototype does
+- **Multi-file ingestion:** HRIS, payroll, and CRM exports with different
+  headers, formats, coverage, and data quality are reconciled into one target
+  dataset.
+- **Deterministic execution:** the model proposes mappings or repairs; code
+  applies only gated proposals. Whitespace, casing, dates, currencies,
+  phone numbers, enums, validation, and safe deduplication are handled by
+  deterministic code.
+- **Grouped escalations:** repeated instances become one reusable question.
+  Decisions are cached by stable signatures, so the same ambiguity is not
+  re-asked on every import.
+- **Human supervision:** a server-rendered UI shows live progress, the
+  escalation queue, affected records, the push gate, and the audit trail.
+- **Real integration behavior:** the target is a separate HTTP process with
+  per-record status, retries for transient `500`/`429` failures, handling for
+  deterministic `422` refusals, and rollback support.
+- **Measured behavior:** the checked-in sample measurement covers 13,299
+  source rows and compresses 1,350 escalation rows into 16 distinct
+  questions. Measured escalation classes have recall from 0.9398 to 1.0 and
+  code precision of 1.0.
 
-The agent is designed to satisfy the assignment acceptance criteria:
+The system fails toward asking. A missing value is safer than an invented
+one, and leaving a possible duplicate is safer than merging two employees
+incorrectly.
 
-1. Multi-file ingestion
-   - Loads multiple source files representing the same employee set.
-   - Reconciles divergent exports without a single field-by-field instruction set.
+## Architecture
 
-2. Autonomous mapping and cleanup
-   - Proposes source-to-target mappings.
-   - Fixes obvious issues such as date normalization, whitespace, casing, and duplicate detection.
-   - Applies rules without blocking on every single field.
+```text
+source exports
+    -> profile and propose mappings
+    -> deterministic cleaning and schema validation
+    -> cross-source reconciliation and deduplication
+    -> grouped human escalations
+    -> approval-gated, idempotent push
+    -> audit log and per-record result
+```
 
-3. Defensible escalation boundary
-   - Stops only when a mapping is genuinely uncertain or a record fails validation in a way a human should decide.
-   - Leaves routine cleanup and dedupe inside the agent’s autonomous loop.
+The policy in [`policy/escalation.yaml`](policy/escalation.yaml) is the single
+source of truth for why the agent stops. It is snapshotted into each run so
+old runs remain explainable even when policy thresholds change.
 
-4. Human-in-the-loop UI
-   - Shows the agent’s progress.
-   - Surfaces escalations with enough context for a non-technical reviewer to act quickly.
-   - Allows approval, correction, or rejection.
+## Run locally
 
-5. Mock system integration
-   - Pushes cleaned records to a stub target API.
-   - Handles retry and rollback behavior.
-   - Records the audit trail for what changed and why.
-
-6. Delta-driven improvement
-   - Allows the data quality loop to continue after the first pass.
-
-## Repository layout
-
-- `app/` — FastAPI app, migration flow, UI routes, worker logic, and agent orchestration
-- `app/agent/` — mapping, normalization, validation, dedupe, escalation, and push logic
-- `app/ui/` — browser-facing interface and templates
-- `schemas/` — target schema definition
-- `policy/` — escalation thresholds and rules
-- `tools/` — sample data generator and target API mock
-- `data/samples/` — generated source files for local demos
-
-## Running it end to end
-
-Two processes: the agent, and a stand-in for the target HR system. They are
-separate on purpose — pushing to the target is real HTTP to something the agent
-does not own, so retry, idempotency and rollback are real rather than simulated.
-
-Commands below use [just](https://github.com/casey/just), which reads the
-[justfile](justfile) in this repo. Install it with `uv tool install rust-just` (the package is named
-`rust-just`; the command it installs is `just`),
-or run the underlying command shown beneath each step.
+Requirements: Python 3.14 and [uv](https://docs.astral.sh/uv/). Install
+[`just`](https://github.com/casey/just) for the shortcuts below, or run the
+commands printed beneath each recipe directly.
 
 ### 1. Install
 
 ```bash
-just install                                  # uv sync
+just install
 ```
 
-Python 3.14 and [uv](https://docs.astral.sh/uv/) are the only requirements.
-Everything else, including the databases, is created on first run.
+This runs `uv sync`. SQLite databases and run data are created on demand.
 
 ### 2. Configure a model
 
@@ -76,177 +76,184 @@ Everything else, including the databases, is created on first run.
 cp .env.example .env
 ```
 
-The agent uses a model for two decisions only: proposing a column mapping, and
-normalising a value the deterministic cleaners could not resolve. It needs at
-least one of:
+The model is used for column-mapping proposals and unresolved value
+normalization. Configure either:
 
-- **Hosted** — set `GROQ_ENV_KEY`. `GROQ_MODEL` is the first model tried and
-  `GROQ_FALLBACK_MODELS` the ones after it, in order.
-- **Local** — set `LOCAL_FALLBACK_MODEL` and `LOCAL_FALLBACK_URL` to any
-  OpenAI-compatible endpoint (llama.cpp's `llama-server`, Ollama, vLLM). Used
-  when no hosted model can serve the call.
+- `GROQ_ENV_KEY` for the hosted model chain. `GROQ_MODEL` is tried first,
+  followed by the models in `GROQ_FALLBACK_MODELS`;
+- `LOCAL_FALLBACK_MODEL` and `LOCAL_FALLBACK_URL` for an
+  OpenAI-compatible local endpoint such as `llama-server`, Ollama, or vLLM.
+  This is used when no hosted model can serve the call.
 
-With neither, the agent still runs: mapping falls back to name similarity and
-unresolvable values are escalated instead of normalised. Fewer decisions get
-made automatically, and nothing is guessed.
+With neither configured, mapping uses name similarity and unresolved values
+are escalated. The system does not invent values. For small local reasoning
+models, keep `LOCAL_DISABLE_THINKING=true`.
 
-> If you use a local reasoning model, keep `LOCAL_DISABLE_THINKING=true`. A
-> small model asked to think will spend its whole output budget reasoning and
-> return nothing — measured on qwen3-8b: 4,096 tokens of reasoning, empty answer.
+In the demonstrated run, model serving was local `llama.cpp` with
+`Qwen3.5-9B`, so confidential employee data stayed inside the trust boundary.
 
 ### 3. Generate source data
 
 ```bash
-just samples                                  # or: just samples 1500
+just samples
 ```
 
-<sub>`uv run tools/generate_sources.py --rows 5000 --out data/samples`</sub>
+This writes deliberately divergent HRIS, payroll, and CRM exports to
+`data/samples/`, together with `manifest.json`. The manifest is ground truth
+for the measurement command. The generated files include missing fields,
+mixed date formats, duplicate candidates, source conflicts, malformed enums,
+and target-rejection cases.
 
-Writes three deliberately divergent exports — a legacy HRIS CSV, a payroll CSV
-and a CRM spreadsheet — plus `manifest.json`, which records every anomaly it
-injected. That manifest is the ground truth the measurement script scores
-against.
+For a quicker end-to-end fixture:
 
-### 4. Start the target system (terminal 1)
+```bash
+just demo
+```
+
+### 4. Start the target and agent
+
+Run the target separately on purpose. It represents a vendor system that the
+agent does not own, so HTTP retries, idempotency, per-record outcomes, and
+rollback are observable rather than mocked inside the same process.
+
+In terminal 1:
 
 ```bash
 just target
 ```
 
-<sub>`uv run tools/mock_target_api.py --port 8900 --enable-nuke`</sub>
-
-A standalone PEP-723 script with its own database. It injects mixed failures on
-purpose: transient 500s and 429s that retrying fixes, and deterministic 422s
-that it never will — the latter are the only reason the rejection and rollback
-paths are demonstrable.
-
-### 5. Start the agent (terminal 2)
+In terminal 2:
 
 ```bash
 just dev
 ```
 
-<sub>`uv run uvicorn app.main:app --reload`</sub>
+Open <http://127.0.0.1:8000>.
 
-Then open **http://127.0.0.1:8000**.
+### 5. Run a migration
 
-### 6. Run a migration
+1. Upload all generated source files from `data/samples/`. The page returns
+  immediately while the agent works in the background.
+2. Watch the live run move through profiling, mapping, reconciliation,
+  cleaning, and validation. The activity view reports model calls, retries,
+  decisions, and progress.
+3. Resolve grouped questions in the queue. Each card explains the policy,
+  affected records, and the effect of approving or rejecting the proposal.
+  Row-specific questions provide the affected record and accept a correction
+  or instruction.
+4. Approve the push to the target. This is the second deliberate human gate:
+  the agent is about to write to a system it does not own.
+5. Resolve any deterministic target refusals and push corrected records again.
+  Transient failures retry automatically; deterministic `422` responses do
+  not.
+6. Inspect the run summary and audit log at `/runs/{id}/audit`, or export the
+  audit log as CSV.
 
-1. **Upload** all three files from `data/samples/` at once. The page returns
-   immediately; the agent works in the background and reports itself live, with
-   a progress bar and a named line for every model call, retry and decision.
-2. **Watch it run.** It goes `uploaded → mapped → reconciled` without any clicks.
-3. **Answer the questions.** It stops for the things it will not decide. Each
-   card says what approving and rejecting will actually do; questions whose
-   answer differs per record open a row-by-row page instead, where you can type
-   an instruction in plain English, paste `employee id, value` lines, or edit
-   rows one at a time.
-4. **Push.** The second and last place it waits for a person, because it writes
-   to a system the agent does not own.
-5. **Correct what the target refused.** A deterministic 4xx cannot be retried
-   into success, so the agent works out what to change and asks. Approve, then
-   push again — only corrected records are re-sent.
-6. **Check the audit trail** at `/runs/{id}/audit`, or export it as CSV.
-
-### 7. Score it against ground truth
+### 6. Measure escalation quality
 
 ```bash
 just measure
 ```
 
-<sub>`uv run tools/measure_escalations.py --json data/samples/measurement.json`</sub>
+This compares the run with the injected-anomaly manifest and reports recall
+and precision by anomaly type. The JSON report is written to
+`data/samples/measurement.json`.
 
-Compares what was escalated against every anomaly the generator injected, and
-prints recall and precision per anomaly type.
+For model comparisons, use `just eval`. It scores the model chain on the
+mapping and normalization calls the agent actually makes.
 
-## Clearing data between runs
+## Resetting local data
+
+Keep the model decision cache and clear the agent and target stores:
 
 ```bash
-just nuke                                     # needs ENABLE_NUKE=true
+just nuke
 ```
 
-<sub>`curl -X POST localhost:8000/nuke`</sub>
-
-Empties the agent's tables and asks the target to empty its own, in one call. It
-deliberately **keeps the model cache**, so the next run does not pay for the same
-answers twice — the difference between a 20-second re-run and a slow one. The
-same thing is in the UI at `/nuke`, which shows what will be deleted first.
-
-For a genuinely cold start:
+For a cold start that also deletes cached model decisions:
 
 ```bash
 just reset
 ```
 
-<sub>`rm -rf data/dwight.db data/dwight.db-wal data/dwight.db-shm data/runs data/mock_target.db`</sub>
-
-This deletes the database files outright, model cache included, so the next run
-re-pays for every LLM call. `data/samples/` is untouched either way.
+The reset command removes local SQLite files and generated run directories;
+`data/samples/` is left intact.
 
 ## Containers
 
 ```bash
-just up          # podman compose up --build
+just up
 just down
 ```
 
-Brings up both services on :8000 and :8900. `docker compose` works the same way.
+This starts the agent on port `8000` and the separate mock target on port
+`8900` with Podman Compose. Docker Compose works with the same
+`compose.yaml`.
 
-## All recipes
+## Recipes
 
 | Recipe | What it does |
 |---|---|
-| `just install` | `uv sync` |
-| `just dev` | the agent on :8000, with reload |
-| `just target` | the mock target on :8900, `/nuke` enabled |
-| `just samples [rows]` | regenerate `data/samples/`, default 5,000 rows |
-| `just demo [rows]` | reset and generate a smaller fixture that still fires every escalation type |
-| `just measure` | score the last run against the ground-truth manifest |
-| `just nuke [port]` | clear both stores, keep the model cache |
-| `just reset` | delete the database files, cache included |
-| `just up` / `just down` | podman compose |
-| `just docs` | typeset the write-up and deep dive to PDF |
+| `just install` | Install or update the locked environment with `uv sync` |
+| `just dev` | Run the FastAPI agent on port `8000` with reload |
+| `just target` | Run the mock target on port `8900` with `/nuke` enabled |
+| `just samples [rows]` | Generate source exports and a ground-truth manifest; defaults to 5,000 rows |
+| `just demo [rows]` | Reset and generate a smaller fixture that still exercises every escalation type |
+| `just measure` | Score the latest run against the ground-truth manifest |
+| `just eval [args]` | Evaluate configured models on the agent's model calls |
+| `just nuke [port]` | Clear both stores while keeping the model decision cache |
+| `just reset` | Delete local databases, run data, and the model cache |
+| `just up` / `just down` | Start or stop both container services |
+| `just docs` | Typeset the write-up and deep dive to PDF |
 
-`just docs` additionally needs [typst](https://typst.app/) and a checkout of the
-Centauri design system beside this repo; pass a different location with
+`just docs` additionally needs [Typst](https://typst.app/) and a checkout of
+the Centauri design system beside this repository. Pass another location with
 `just docs ../elsewhere`.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `app/agent/` | Mapping, cleaning, reconciliation, dedupe, validation, escalation, and push orchestration |
+| `app/ingest/` | CSV/XLSX readers and source profiling |
+| `app/ui/` | FastAPI routes, Jinja templates, CSS, and browser enhancements |
+| `app/llm/` | OpenAI-compatible model client and prompts |
+| `schemas/` | Target employee schema |
+| `policy/` | Escalation rules and thresholds |
+| `tools/` | Source generator, measurement harness, model evaluation, and mock target API |
+| `data/samples/` | Generated fixtures, anomaly manifest, and measurement artifacts |
 
 ## Configuration
 
 | Variable | Purpose |
 |---|---|
-| `GROQ_ENV_KEY` | Hosted model key. Without it, the local model is used. |
-| `GROQ_MODEL` | First hosted model tried. |
-| `GROQ_FALLBACK_MODELS` | Comma-separated models tried after it, in order. |
-| `LOCAL_FALLBACK_MODEL` | Model name at the local endpoint. |
-| `LOCAL_FALLBACK_URL` | OpenAI-compatible endpoint, default `http://localhost:8080/v1`. |
-| `LOCAL_DISABLE_THINKING` | Keep `true` for small reasoning models. |
-| `DB_PATH` | SQLite file, default `data/dwight.db`. |
-| `TARGET_API_URL` | Where to push, default `http://127.0.0.1:8900/v1`. |
-| `ENABLE_NUKE` | Registers `POST /nuke`. Testing only; the route does not exist without it. |
+| `GROQ_ENV_KEY` | Hosted model key |
+| `GROQ_MODEL` | First hosted model to try |
+| `GROQ_FALLBACK_MODELS` | Comma-separated hosted fallback models |
+| `LOCAL_FALLBACK_MODEL` | Model name at the local endpoint |
+| `LOCAL_FALLBACK_URL` | OpenAI-compatible endpoint; defaults to `http://localhost:8080/v1` |
+| `LOCAL_DISABLE_THINKING` | Disable reasoning output for small local models |
+| `DB_PATH` | Agent SQLite file; defaults to `data/dwight.db` |
+| `TARGET_API_URL` | Push destination; defaults to `http://127.0.0.1:8900/v1` |
+| `ENABLE_NUKE` | Enables the testing-only `POST /nuke` route |
 
-Thresholds are **not** environment variables. Every one lives in
-[policy/escalation.yaml](policy/escalation.yaml), read by a single module, and is
-snapshotted into each run so old runs stay explicable.
+Thresholds are configured in [`policy/escalation.yaml`](policy/escalation.yaml),
+not in environment variables.
 
 ## Tech stack
 
-- Python 3.14, managed with `uv`
-- FastAPI and Jinja2, server-rendered; JavaScript is enhancement only and every
-  action works as a plain form POST
-- Pydantic, with the validation model built at runtime from the YAML schema
-- SQLite in WAL mode for run state and the audit trail
-- rapidfuzz for duplicate scoring, phonenumbers for E.164, openpyxl for xlsx
-- Any OpenAI-compatible model, hosted or local
+- Python 3.14, `uv`, FastAPI, Uvicorn, and Jinja2
+- Pydantic models built from the YAML target schema
+- SQLite in WAL mode for run state, decisions, and audit history
+- LiteLLM/Groq or any OpenAI-compatible local model endpoint
+- `rapidfuzz`, `phonenumbers`, `openpyxl`, and `python-dateutil`
+- Plain HTML, CSS, and JavaScript served by FastAPI
 
-## Where to read next
+## Next steps
 
-- [schemas/employee.v1.yaml](schemas/employee.v1.yaml) — the target model. Nothing
-  about the employee schema is hardcoded in Python; changing this file changes
-  the pipeline.
-- [policy/escalation.yaml](policy/escalation.yaml) — every threshold that decides
-  whether the agent acts or asks.
-- [app/agent/policy.py](app/agent/policy.py) — the only module that emits a reason
-  code. If you want to know why the agent stopped, it is in here.
-- [app/agent/runner.py](app/agent/runner.py) — the autonomy boundary: what runs
-  unattended, and the two places it deliberately does not.
+- Calibrate override thresholds against labelled ground truth instead of
+  hand-picked values.
+- Extend the evaluation harness to score threshold choices.
+- Add incremental sync against a real target such as Workday, ADP, EY
+  Payroll, or ServiceNow.
+- Add cross-run and cross-agent memory with explicit retention controls.
