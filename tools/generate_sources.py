@@ -7,7 +7,7 @@
 # ]
 # ///
 """Generate three deliberately divergent employee-data exports plus a ground-truth
-manifest for the darwinbox-migration-agent demo.
+manifest for the Dwight demo.
 
 One canonical (clean) employee record is generated per row, seeded for
 reproducibility. Each of the three source files then gets its own
@@ -16,7 +16,7 @@ etc.) plus a set of rare, independently-triggered anomalies. Every anomaly
 type fires on a flat `rng.random() < rate` check against the full row
 population -- never nested inside another anomaly's condition -- so the
 rate actually measured in the manifest cannot silently collapse the way it
-did in the earlier ServiceNow generator (a 4% rate gated behind an unrelated
+did in an earlier generator (a 4% rate gated behind an unrelated
 8-way categorical came out near 0.67% in practice).
 
 Employer used in the sample data: Meridian Logistics (meridianlogistics.example).

@@ -20,7 +20,7 @@ services:
     depends_on:
       - target
 
-  # Stand-in for the Darwinbox target system. Deliberately its own service with
+  # Stand-in for the target HR platform. Deliberately its own service with
   # its own store, so a push is real HTTP to something this agent does not own
   # and a rollback is externally observable. It clears its own store on /nuke --
   # neither system reaches into the other's database.

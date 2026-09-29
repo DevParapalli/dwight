@@ -7,7 +7,7 @@
 #   "uvicorn>=0.53.0",
 # ]
 # ///
-"""A stand-in for the Darwinbox target system: a separate process the migration
+"""A stand-in for the target HR platform: a separate process the migration
 agent pushes to over real HTTP, with its own storage.
 
 It serves its own read-only HTML at / so what it holds can be inspected without
@@ -82,7 +82,7 @@ state = {
     "enable_nuke": False,
 }
 
-app = FastAPI(title="mock darwinbox target")
+app = FastAPI(title="mock HR target")
 
 # The browsable pages borrow Proxima from the agent's static directory. A
 # stylesheet is the only thing the two systems share -- resolved from this
