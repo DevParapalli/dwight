@@ -1,7 +1,7 @@
 [project]
 name = "dwight"
 version = "0.1.0"
-description = "Darwinbox migration agent: schema-driven employee-record ingestion, cleaning, and escalation"
+description = "HR data migration agent: schema-driven employee-record ingestion, cleaning, and escalation"
 readme = "README.md"
 authors = [
     { name = "DevParapalli", email = "hey@parapalli.dev" }
