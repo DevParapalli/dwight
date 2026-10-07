@@ -77,15 +77,18 @@ cp .env.example .env
 ```
 
 The model is used for column-mapping proposals and unresolved value
-normalization. Configure either:
+normalization. Configure one of:
 
+- `ANTHROPIC_API_KEY` for Anthropic. When it is set, `ANTHROPIC_MODEL`
+  serves every call at `ANTHROPIC_EFFORT`, and nothing falls back to another
+  backend, so one run's answers come from one model;
 - `GROQ_ENV_KEY` for the hosted model chain. `GROQ_MODEL` is tried first,
   followed by the models in `GROQ_FALLBACK_MODELS`;
 - `LOCAL_FALLBACK_MODEL` and `LOCAL_FALLBACK_URL` for an
   OpenAI-compatible local endpoint such as `llama-server`, Ollama, or vLLM.
   This is used when no hosted model can serve the call.
 
-With neither configured, mapping uses name similarity and unresolved values
+With none configured, mapping uses name similarity and unresolved values
 are escalated. The system does not invent values. For small local reasoning
 models, keep `LOCAL_DISABLE_THINKING=true`.
 
@@ -149,7 +152,32 @@ Open <http://127.0.0.1:8000>.
 6. Inspect the run summary and audit log at `/runs/{id}/audit`, or export the
   audit log as CSV.
 
-### 6. Measure escalation quality
+### 6. Run later batches on learned rules
+
+Every answer given in the queue is stored as a decision. A later batch of the
+same exports applies them without asking again: accepted column mappings are
+reused per export and column, an answered day/month order or approved date
+format is applied to that column, and value normalizations learned from the
+model are reused.
+
+```bash
+just auto
+```
+
+This runs the agent with `DWIGHT_MODE=automation`, which switches model calls
+off. Stored decisions and cached answers are the only rules; anything they do
+not cover is escalated rather than guessed. To review the rules a batch runs
+on, export them:
+
+```bash
+just rules
+```
+
+This writes `rules/RULEBOOK.md` with the mappings, decisions, learned
+normalizations, and escalation policy in force. The file is generated from
+the local database and is not tracked.
+
+### 7. Measure escalation quality
 
 ```bash
 just measure
@@ -199,6 +227,8 @@ This starts the agent on port `8000` and the separate mock target on port
 | `just target` | Run the mock target on port `8900` with `/nuke` enabled |
 | `just samples [rows]` | Generate source exports and a ground-truth manifest; defaults to 5,000 rows |
 | `just demo [rows]` | Reset and generate a smaller fixture that still exercises every escalation type |
+| `just auto` | Run the agent on port `8000` with model calls off, on stored rules only |
+| `just rules` | Write `rules/RULEBOOK.md` from the local database |
 | `just measure` | Score the latest run against the ground-truth manifest |
 | `just eval [args]` | Evaluate configured models on the agent's model calls |
 | `just nuke [port]` | Clear both stores while keeping the model decision cache |
@@ -217,16 +247,22 @@ the Centauri design system beside this repository. Pass another location with
 | `app/agent/` | Mapping, cleaning, reconciliation, dedupe, validation, escalation, and push orchestration |
 | `app/ingest/` | CSV/XLSX readers and source profiling |
 | `app/ui/` | FastAPI routes, Jinja templates, CSS, and browser enhancements |
-| `app/llm/` | OpenAI-compatible model client and prompts |
+| `app/llm/` | Anthropic, Groq, and OpenAI-compatible model client, and prompts |
 | `schemas/` | Target employee schema |
 | `policy/` | Escalation rules and thresholds |
-| `tools/` | Source generator, measurement harness, model evaluation, and mock target API |
+| `tools/` | Source generator, measurement harness, model evaluation, rulebook export, and mock target API |
+| `tests/` | Unit tests; run with `uv run pytest` |
 | `data/samples/` | Generated fixtures, anomaly manifest, and measurement artifacts |
 
 ## Configuration
 
 | Variable | Purpose |
 |---|---|
+| `DWIGHT_MODE` | `agent` (default) or `automation`; automation switches model calls off |
+| `ANTHROPIC_API_KEY` | Anthropic key; when set, the only model backend |
+| `ANTHROPIC_MODEL` | Defaults to `claude-sonnet-5-5` |
+| `ANTHROPIC_EFFORT` | `low` (default), `medium`, or `high` |
+| `ANTHROPIC_MAX_OUTPUT_TOKENS` | Per-call ceiling, thinking included; defaults to `4096` |
 | `GROQ_ENV_KEY` | Hosted model key |
 | `GROQ_MODEL` | First hosted model to try |
 | `GROQ_FALLBACK_MODELS` | Comma-separated hosted fallback models |
@@ -245,7 +281,7 @@ not in environment variables.
 - Python 3.14, `uv`, FastAPI, Uvicorn, and Jinja2
 - Pydantic models built from the YAML target schema
 - SQLite in WAL mode for run state, decisions, and audit history
-- LiteLLM/Groq or any OpenAI-compatible local model endpoint
+- Anthropic, Groq, or any OpenAI-compatible local model endpoint
 - `rapidfuzz`, `phonenumbers`, `openpyxl`, and `python-dateutil`
 - Plain HTML, CSS, and JavaScript served by FastAPI
 
