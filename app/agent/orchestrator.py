@@ -6,7 +6,11 @@ from app.agent.escalate import create_or_merge_escalation
 from app.agent.mapper import MappingProposal, propose_mapping
 from app.agent.normalize_llm import normalize_values
 from app.agent.policy import decide_mapping
-from app.agent.validate import validate_and_clean_record
+from app.agent.validate import (
+    date_question,
+    reset_learned_rules,
+    validate_and_clean_record,
+)
 from app.audit import record_change, utcnow
 from app.db import connect, new_id
 from app.ingest.profile import profile_table
@@ -61,6 +65,7 @@ def ingest_and_map(run_id: str, source_paths: list[Path], schema: Schema, policy
                 (file_id, run_id, table.filename, table.source_type, utcnow()),
             )
 
+        date_columns: dict[str, str] = {}
         for index, profile in enumerate(profiles, start=1):
             proposal = learned_mapping(table.filename, profile.name) or propose_mapping(profile, schema)
             emit(run_id, "llm",
@@ -120,10 +125,41 @@ def ingest_and_map(run_id: str, source_paths: list[Path], schema: Schema, policy
                 done=index, total=len(profiles), reason_code=decision.reason_code,
                 cached=proposal.cache_hit, model=proposal.model,
             )
+            if proposal.target_field and schema.fields[proposal.target_field].type == "date":
+                date_columns[profile.name] = proposal.target_field
+
+        _ask_date_questions(run_id, table, file_id, date_columns, schema, policy)
 
     with connect() as conn:
         conn.execute("UPDATE runs SET stage = 'mapped', updated_at = ? WHERE id = ?", (utcnow(), run_id))
     emit(run_id, "stage", "Mapping done", stage="mapped")
+
+
+def _ask_date_questions(run_id: str, table, file_id: str, date_columns: dict[str, str],
+                        schema: Schema, policy: dict) -> None:
+    """Date format is a column-level decision, so it is asked at the mapping gate:
+    answered once before row processing instead of holding rows back all run."""
+    if not date_columns:
+        return
+    # A decision answered on an earlier batch must be visible to this scan.
+    reset_learned_rules()
+    asked: dict[str, tuple[str, str, str]] = {}
+    with connect() as conn:
+        for row in table.rows():
+            for column, field in date_columns.items():
+                decision = date_question(schema.fields[field], row.get(column), table.filename, policy)
+                if decision is None:
+                    continue
+                escalation_id = create_or_merge_escalation(conn, run_id, decision, entity_id=file_id)
+                if escalation_id:
+                    asked.setdefault(escalation_id, (column, field, decision.reason_code))
+    # emit opens its own connection, so it waits until the scan's write commits.
+    for column, field, reason_code in asked.values():
+        emit(run_id, "escalation", f"{column} -> {field} ({reason_code}, needs you)",
+             stage="mapped", what="date format", file=table.filename, column=column,
+             reason_code=reason_code)
+    # Answers given at the gate are read fresh when rows are validated.
+    reset_learned_rules()
 
 
 def clean_and_validate(run_id: str, schema: Schema, policy: dict) -> None:
@@ -152,6 +188,8 @@ def clean_and_validate(run_id: str, schema: Schema, policy: dict) -> None:
     for r in mapping_rows:
         info = files.setdefault(r["source_file_id"], {"filename": r["filename"], "column_map": {}})
         info["column_map"][r["column_name"]] = r["target_field"]
+
+    reset_learned_rules()
 
     max_edit_distance = policy["values"]["enum_auto_max_edit_distance"]
 

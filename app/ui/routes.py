@@ -316,6 +316,14 @@ REASON_CODE_HELP = {
         "approve": "every date in that column is read the way shown",
         "reject": "the dates are left unread and the affected records wait",
     },
+    "DATE_FORMAT_UNKNOWN": {
+        "title": "Dates arrived in a format the agent has not seen",
+        "means": "Some dates are written in a shape none of the agreed date formats "
+                 "can read, such as 2024.03.18. The agent has found a format that "
+                 "reads them but will not adopt it without you.",
+        "approve": "dates in this shape are read with the format shown, now and in later batches",
+        "reject": "the dates are left unread and the affected records wait",
+    },
     "VALIDATE_TWICE": {
         "title": "A record is still wrong after one attempt to fix it",
         "means": "The agent tried to correct this record once, and it still does not "
@@ -755,6 +763,19 @@ def _compared_pair(run_id: str, entity_id: str) -> dict | None:
         "fields": fields,
         "differing": sum(1 for f in fields if f["differs"]),
     }
+
+
+def _source_file(run_id: str, entity_id: str | None) -> dict | None:
+    if not entity_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT sf.filename, COUNT(r.id) AS records FROM source_files sf
+               LEFT JOIN records r ON r.source_file_id = sf.id
+               WHERE sf.id = ? AND sf.run_id = ? GROUP BY sf.id""",
+            (entity_id, run_id),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def _affected_records(run_id: str, reason_code: str, signature: str) -> list[dict]:
@@ -1207,6 +1228,8 @@ async def view_queue(request: Request, run_id: str):
             # have a single answer, and a row-by-row page would imply otherwise.
             card["column"] = (_mapped_column(run_id, r["entity_id"])
                               if r["reason_code"] in ("MAP_AMBIGUOUS", "MAP_UNMAPPED") else None)
+            # File-scoped questions point at a source file, not a record or column.
+            card["source_file"] = _source_file(run_id, r["entity_id"])
             card["fill_field"] = (r["repair_field"]
                                   if r["reason_code"] in FILLABLE_REASON_CODES else None)
             card["examples"] = ([] if card["pair"]

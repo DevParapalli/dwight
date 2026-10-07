@@ -1,5 +1,7 @@
+import json
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from datetime import datetime
 
 from pydantic import ValidationError
 
@@ -17,7 +19,9 @@ from app.agent.policy import (
     decide_enum_coercion,
     decide_llm_normalization,
     decide_logic_contradiction,
+    decide_unknown_date,
     decide_validate_twice,
+    signature,
 )
 from app.llm.client import LLMNotConfigured, complete_json
 from app.llm.prompts import build_correction_prompt
@@ -29,6 +33,51 @@ RULE_PRIMARY_FIELD = {
     "R1": "termination_date", "R2": "termination_date", "R3": "termination_date",
     "R4": "date_of_birth", "R5": "manager_employee_id", "R6": "manager_employee_id",
 }
+
+# Formats a person has approved for a column, read from the decisions table once
+# per batch. A rule learned on one batch is applied to every later one, which is
+# what lets a change batch run with no model and no questions.
+_learned_dates: dict[tuple[str, str], list[str]] = {}
+
+# Shapes the agent tries when no accepted format reads a date, to propose one.
+_CANDIDATE_FORMATS = ["%Y.%m.%d", "%d.%m.%Y", "%m/%d/%Y", "%Y%m%d", "%d.%m.%y", "%m-%d-%Y", "%b %d, %Y"]
+
+
+def reset_learned_rules() -> None:
+    _learned_dates.clear()
+
+
+def _learned_formats(filename: str, field_name: str, raw: str) -> list[str]:
+    from app.db import connect
+
+    key = (filename, field_name)
+    if key not in _learned_dates:
+        formats: list[str] = []
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT reason_code, signature, resolution FROM decisions "
+                "WHERE reason_code IN ('DATE_FORMAT_AMBIGUOUS', 'DATE_FORMAT_UNKNOWN')"
+            ).fetchall()
+        order_sig = signature("DATE_FORMAT_AMBIGUOUS", f"{filename}:{field_name}")
+        for row in rows:
+            res = json.loads(row["resolution"])
+            if res.get("action") == "reject" or not res.get("value"):
+                continue
+            if row["reason_code"] == "DATE_FORMAT_AMBIGUOUS" and row["signature"] == order_sig:
+                formats.append("%m/%d/%Y" if res["value"] == "month_first" else "%d/%m/%Y")
+            elif row["reason_code"] == "DATE_FORMAT_UNKNOWN":
+                formats.append(res["value"])
+        _learned_dates[key] = formats
+    formats = _learned_dates[key]
+    # Unknown-shape formats are stored per shape; only the ones that read this value apply.
+    return [f for f in formats if _try_format(raw, f) is not None]
+
+
+def _try_format(raw: str, fmt: str):
+    try:
+        return datetime.strptime(raw, fmt).date()  # noqa: DTZ007
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -65,12 +114,27 @@ def _clean_enum_field(f: SchemaField, raw_value, policy: dict, normalization_map
 
 def _clean_date_field(f: SchemaField, raw_value, filename: str, policy: dict) -> tuple[object, list[Issue]]:
     issues: list[Issue] = []
+    raw = str(raw_value).strip() if isinstance(raw_value, str) else None
+    if raw:
+        for fmt in _learned_formats(filename, f.name, raw):
+            return _try_format(raw, fmt), issues
+    if isinstance(raw_value, datetime):
+        return raw_value.date(), issues
     parsed, ambiguous = parse_date_value(raw_value, policy["dates"]["accepted_formats"])
     if ambiguous:
         decision = decide_date(f.name, filename, True, policy, raw_value=str(raw_value or ""))
         if decision.reason_code:
             issues.append(Issue(decision, f.name))
+    elif parsed is None and raw:
+        guess = next((fmt for fmt in _CANDIDATE_FORMATS if _try_format(raw, fmt)), None)
+        issues.append(Issue(decide_unknown_date(f.name, filename, raw, guess), f.name))
     return parsed, issues
+
+
+def date_question(f: SchemaField, raw_value, filename: str, policy: dict):
+    """The date question this value would raise during validation, if any."""
+    _, issues = _clean_date_field(f, raw_value, filename, policy)
+    return issues[0].decision if issues else None
 
 
 def _attempt_correction(cleaned: dict, errors: list[str], schema: Schema, model) -> tuple[dict, list[str]]:

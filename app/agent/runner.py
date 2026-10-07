@@ -32,7 +32,8 @@ def mapping_gate_is_open(run_id: str) -> bool:
     with connect() as conn:
         pending = conn.execute(
             "SELECT COUNT(*) AS n FROM escalations "
-            "WHERE run_id = ? AND status = 'open' AND reason_code IN ('MAP_AMBIGUOUS', 'MAP_UNMAPPED')",
+            "WHERE run_id = ? AND status = 'open' AND reason_code IN ('MAP_AMBIGUOUS', 'MAP_UNMAPPED', "
+            "'DATE_FORMAT_AMBIGUOUS', 'DATE_FORMAT_UNKNOWN')",
             (run_id,),
         ).fetchone()["n"]
     return pending == 0
@@ -66,7 +67,7 @@ def advance_run(run_id: str, schema: Schema, policy: dict, source_paths: list[Pa
         stage = _stage_of(run_id)
 
     if stage == GATE_STAGE and not mapping_gate_is_open(run_id):
-        _note(run_id, "paused: column mappings need review before row processing", GATE_STAGE)
+        _note(run_id, "paused: column mappings or date formats need review before row processing", GATE_STAGE)
         return "waiting_on_mapping_review"
 
     if stage == GATE_STAGE:
@@ -92,8 +93,9 @@ def run_status(run_id: str) -> dict:
     stage = _stage_of(run_id) or "unknown"
     if stage == GATE_STAGE and not mapping_gate_is_open(run_id):
         return {"stage": stage, "waiting": True,
-                "message": "Paused: some columns could not be mapped confidently. "
-                           "Resolve those and the run continues on its own."}
+                "message": "Paused: some columns could not be mapped confidently, or their "
+                           "dates can be read more than one way. Resolve those and the "
+                           "run continues on its own."}
     if stage == AUTONOMOUS_FINAL_STAGE:
         return {"stage": stage, "waiting": True,
                 "message": "Reconciled and ready. Pushing writes to the target system, "

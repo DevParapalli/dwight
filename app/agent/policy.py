@@ -44,12 +44,14 @@ REASON_CODE_SCOPE = {
     "CONFLICT_ACROSS_SOURCES": "value",
     "PUSH_REJECTED": "record",
     "PUSH_UNREACHABLE": "record",
+    "DATE_FORMAT_UNKNOWN": "column",
 }
 CLASS_SCOPED_REASON_CODES = {
     "MAP_AMBIGUOUS", "MAP_UNMAPPED", "VALUE_LOW_CONFIDENCE", "DATE_FORMAT_AMBIGUOUS",
     # Class-scoped since its signature became field-plus-sources rather than
     # field-plus-values: one question per disagreement shape, not per employee.
     "CONFLICT_ACROSS_SOURCES",
+    "DATE_FORMAT_UNKNOWN",
 }
 
 # Only these carry an answer that is safe to replay onto a later run without
@@ -72,6 +74,7 @@ CLASS_SCOPED_REASON_CODES = {
 LEARNABLE_REASON_CODES = {
     "MAP_AMBIGUOUS", "MAP_UNMAPPED", "VALUE_LOW_CONFIDENCE",
     "DATE_FORMAT_AMBIGUOUS", "DUPE_AMBIGUOUS", "CONFLICT_ACROSS_SOURCES",
+    "DATE_FORMAT_UNKNOWN",
 }
 
 
@@ -392,4 +395,21 @@ def decide_cross_source_conflict(field_name: str, values_by_source: dict[str, ob
         suggested_action=f"trust {winner} for {field_name}",
         suggested_value=winner,
         options=sources,
+    )
+
+
+def decide_unknown_date(field_name: str, filename: str, raw_value: str, guess: str | None) -> PolicyDecision:
+    """A date in a shape no accepted format reads. The agent proposes the format
+    that parses it; a person approves once, and the format becomes a rule for
+    that column in every later batch."""
+    shape = re.sub(r"[0-9]", "N", raw_value)
+    return PolicyDecision(
+        "DATE_FORMAT_UNKNOWN", f"{filename}:{field_name}:{shape}",
+        question=f"Dates in {field_name!r} ({filename}) arrive in a shape no rule reads yet: {raw_value}.",
+        evidence=(f"{raw_value} matches none of dates.accepted_formats"
+                  + (f"; {guess} reads it as a valid date" if guess else "")),
+        suggested_action=(f"read this shape as {guess} from now on" if guess
+                          else "supply the format these dates are written in"),
+        suggested_value=guess,
+        context={"field": field_name, "filename": filename, "shape": shape},
     )
