@@ -15,8 +15,13 @@ def iter_raw_rows(path: Path) -> Iterator[list]:
     sizes this pipeline deals with (profiling makes one pass, cleaning another)."""
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        with path.open(newline="") as f:
-            yield from csv.reader(f)
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            # Regional exports differ in delimiter as well as locale: a
+            # comma-decimal export cannot use the comma as its separator.
+            first = f.readline()
+            f.seek(0)
+            delimiter = ";" if first.count(";") > first.count(",") else ","
+            yield from csv.reader(f, delimiter=delimiter)
     elif suffix == ".xlsx":
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         try:
