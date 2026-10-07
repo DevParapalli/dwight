@@ -29,10 +29,19 @@ def _cache_key(field_name: str, raw_value: str) -> str:
 
 def _get_cached(field_name: str, raw_value: str) -> dict | None:
     with connect() as conn:
-        row = conn.execute(
-            "SELECT response FROM llm_cache WHERE model = ? AND prompt_hash = ?",
-            (active_model(), _cache_key(field_name, raw_value)),
-        ).fetchone()
+        if settings.dwight_mode == "automation":
+            # No model will be asked, so the active model's name says nothing
+            # about which answer applies. The newest answer any model gave is
+            # the learned rule; keyed by model, every one of them would miss.
+            row = conn.execute(
+                "SELECT response FROM llm_cache WHERE prompt_hash = ? ORDER BY created_at DESC LIMIT 1",
+                (_cache_key(field_name, raw_value),),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT response FROM llm_cache WHERE model = ? AND prompt_hash = ?",
+                (active_model(), _cache_key(field_name, raw_value)),
+            ).fetchone()
     return json.loads(row["response"]) if row else None
 
 

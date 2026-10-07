@@ -36,3 +36,24 @@ def test_accepted_mapping_is_reused_for_the_same_export(tmp_path, monkeypatch):
     # Same header in another export, or a mapping nobody accepted, is not a rule.
     assert learned_mapping("payroll_dump.csv", "emp_no") is None
     assert learned_mapping("payroll_dump.csv", "doj") is None
+
+
+def test_automation_mode_reuses_a_value_any_model_learned(tmp_path, monkeypatch):
+    from app.agent.normalize_llm import _store_cached, normalize_values
+
+    monkeypatch.setattr(settings, "db_path", tmp_path / "t.db")
+    init_db()
+    monkeypatch.setattr("app.agent.normalize_llm.active_model", lambda: "hosted-model")
+    _store_cached("employment_status", "A", {"value": "active", "confidence": 0.9, "rationale": "flag"})
+
+    # Another model is active now. In agent mode it asks again, under its own name.
+    monkeypatch.setattr("app.agent.normalize_llm.active_model", lambda: "local-model")
+    monkeypatch.setattr("app.agent.normalize_llm.complete_json_reported",
+                        lambda *a, **k: (_ for _ in ()).throw(client.LLMNotConfigured("off")))
+    assert normalize_values("employment_status", ["active"], ["A"])["A"]["value"] is None
+
+    # With the model off, the answer any model gave is the rule.
+    monkeypatch.setattr(settings, "dwight_mode", "automation")
+    results = normalize_values("employment_status", ["active", "on_leave", "terminated"], ["A", "Z"])
+    assert results["A"]["value"] == "active"
+    assert results["Z"]["value"] is None
