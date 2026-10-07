@@ -34,6 +34,10 @@ demo rows="1500":
     @echo "  browser:     http://127.0.0.1:8000  -> upload all three files in data/samples/"
     @echo "  after push:  just measure"
 
+# Write rules/RULEBOOK.md: mappings, decisions, normalisations and policy in force
+rules:
+    uv run python tools/export_rules.py --db data/dwight.db --out rules/RULEBOOK.md
+
 # Run the agent on :8000 with model calls off; stored rules only
 auto:
     DWIGHT_MODE=automation uv run uvicorn app.main:app

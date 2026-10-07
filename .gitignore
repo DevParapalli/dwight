@@ -361,3 +361,6 @@ data/
 # working notes, plan, brief and long-form write-ups: mine, not part of the
 # shipped source. The write-up PDF is delivered alongside the repo, not in it.
 docs/
+
+# exported rulebook -- generated from the local database by `just rules`
+rules/
