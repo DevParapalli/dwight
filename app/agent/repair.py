@@ -5,7 +5,12 @@ import time
 from datetime import UTC, datetime
 
 from app.db import connect, new_id
-from app.llm.client import LLMNotConfigured, active_model, complete_json_reported
+from app.llm.client import (
+    LLMNotConfigured,
+    active_model,
+    complete_json_reported,
+    model_enabled,
+)
 from app.llm.prompts import build_push_repair_prompt
 from app.progress import emit
 from app.schema.loader import Schema
@@ -124,7 +129,8 @@ def propose_repair(target_error: str, record: dict, schema: Schema,
                 else "no safe fix"), cached=True)
         return proposal, hit.get("why_not", "")
 
-    _say(f"Asking {active_model()} how to fix: {target_error[:90]}", cached=False)
+    if model_enabled():
+        _say(f"Asking {active_model()} how to fix: {target_error[:90]}", cached=False)
 
     system_prompt, user_prompt = build_push_repair_prompt(target_error, record, schema)
     started = time.monotonic()

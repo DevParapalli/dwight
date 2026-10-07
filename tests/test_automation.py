@@ -57,3 +57,12 @@ def test_automation_mode_reuses_a_value_any_model_learned(tmp_path, monkeypatch)
     results = normalize_values("employment_status", ["active", "on_leave", "terminated"], ["A", "Z"])
     assert results["A"]["value"] == "active"
     assert results["Z"]["value"] is None
+
+
+def test_model_off_is_not_reported_as_a_failed_call(monkeypatch):
+    monkeypatch.setattr(settings, "dwight_mode", "automation")
+    reports = []
+    with pytest.raises(client.LLMNotConfigured):
+        client.complete_json_reported("system", "user", report=lambda kind, message: reports.append(kind))
+    assert reports == []
+    assert client.model_enabled() is False

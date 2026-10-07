@@ -115,6 +115,11 @@ class LLMNotConfigured(Exception):
     *was* configured and failed -- that must surface, not be swallowed."""
 
 
+def model_enabled() -> bool:
+    """Whether a model call can be made at all in this mode and configuration."""
+    return settings.dwight_mode != "automation" and active_model() != "none"
+
+
 def active_model() -> str:
     """Which model would actually serve the next call -- used as the cache key
     and audit `model` field, so a local-model result never gets mislabeled or
@@ -316,6 +321,9 @@ def complete_json_reported(system_prompt: str, user_prompt: str, max_tokens: int
     before = active_model()
     try:
         result, latency_ms = complete_json(system_prompt, user_prompt, max_tokens)
+    except LLMNotConfigured:
+        # No call was made, so nothing failed; every caller says so in its own words.
+        raise
     except Exception as exc:
         if report:
             report("llm_failed", f"{before} could not answer: {type(exc).__name__}: {exc}"[:300])
