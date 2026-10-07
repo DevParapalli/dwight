@@ -1,5 +1,5 @@
 /* ============================================================
-   PROXIMA DESIGN SYSTEM, shared behavior (v1.0)
+   PROXIMA DESIGN SYSTEM, shared behavior (v0.2.0)
    Zero dependencies. Include once per page:
      <script src="js/proxima.js" defer></script>
 
@@ -10,7 +10,7 @@
      #fab            display options panel (theme / background / accent)
      .xrow           expandable table rows
      .seg .fchip .toggle   demo active-state behavior
-     .sw             swatch click-to-copy
+     .sw             swatch click-to-copy; .sw[data-token] shows the live token value
 
    Manual API:
      Proxima.spark(svgEl, opts)   area chart + dotted forecast (+ tooltip)
@@ -337,6 +337,21 @@
       t.setAttribute('aria-checked', on ? 'true' : 'false');
     });
   });
+
+  /* ---------- live swatches: show the value of the token in force ---------- */
+  var tokenSwatches = document.querySelectorAll('.sw[data-token]');
+  if (tokenSwatches.length) {
+    Proxima.onRepaint(function () {
+      var cs = getComputedStyle(document.documentElement);
+      tokenSwatches.forEach(function (sw) {
+        var v = cs.getPropertyValue(sw.dataset.token).trim().toUpperCase();
+        if (!v) return;
+        sw.dataset.hex = v;
+        sw.setAttribute('title', 'Click to copy ' + v);
+        var code = sw.querySelector('.meta code'); if (code) code.textContent = v;
+      });
+    });
+  }
 
   /* ---------- swatch click-to-copy ---------- */
   document.querySelectorAll('.sw').forEach(function (sw) {

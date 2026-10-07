@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="accent-ember">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}dwight{% endblock %}</title>
   <link rel="stylesheet" href="/static/css/proxima.css?v={{ asset_version }}">
   <link rel="stylesheet" href="/static/css/dwight.css?v={{ asset_version }}">
-  <script>(function(){try{var h=document.documentElement,t=localStorage.getItem('proxima-theme'),a=localStorage.getItem('proxima-accent'),b=localStorage.getItem('proxima-bg');if(t==='light')h.classList.add('theme-light');if(a&&a!=='indigo')h.classList.add('accent-'+a);if(b==='flat')h.classList.add('bg-flat');}catch(e){}})();</script>
+  <script>(function(){try{var h=document.documentElement,t=localStorage.getItem('proxima-theme'),a=localStorage.getItem('proxima-accent'),b=localStorage.getItem('proxima-bg');if(t==='light')h.classList.add('theme-light');if(a){h.classList.remove('accent-ember');if(a!=='indigo')h.classList.add('accent-'+a);}else{localStorage.setItem('proxima-accent','ember');}if(b==='flat')h.classList.add('bg-flat');}catch(e){}})();</script>
   <script src="/static/js/proxima.js?v={{ asset_version }}" defer></script>
   {% block head %}{% endblock %}
 </head>

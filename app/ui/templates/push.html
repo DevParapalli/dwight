@@ -15,8 +15,8 @@
 
 <div class="page-head">
   <div>
-    <div class="eyebrow">( <b>PUSH</b> · {{ stage | upper }} )</div>
-    <h1>Writing to the <em class="serif-em">target.</em></h1>
+    <div class="index-line"><span class="n">PUSH</span><span class="t">{{ stage | upper }}</span></div>
+    <h1>Writing to the target.</h1>
     <div class="when" aria-live="polite">
       {{ "{:,}".format(succeeded) }} accepted, {{ "{:,}".format(rejected) }} refused outright
       ({{ failure_rate }}% deterministic). {{ "{:,}".format(retried) }} attempt{{ '' if retried == 1 else 's' }} were retries after a transient failure.

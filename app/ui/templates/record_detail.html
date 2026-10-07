@@ -6,7 +6,7 @@
 
 <div class="page-head">
   <div>
-    <div class="eyebrow">( <b>RECORD</b> · {{ record.status | upper | replace('_', ' ') if record else 'MISSING' }} )</div>
+    <div class="index-line"><span class="n">RECORD</span><span class="t">{{ record.status | upper | replace('_', ' ') if record else 'MISSING' }}</span></div>
     <h1>{{ record.natural_key if record and record.natural_key else record_id }}</h1>
     <div class="when">
       {% if record %}

@@ -6,8 +6,8 @@
 
 <div class="page-head">
   <div>
-    <div class="eyebrow">( <b>FILL IN THE MISSING VALUES</b> )</div>
-    <h1>{{ rows | length }} record{{ '' if rows | length == 1 else 's' }} need a <em class="serif-em">{{ field | replace('_', ' ') }}</em>.</h1>
+    <div class="index-line"><span class="n">FILL IN THE MISSING VALUES</span></div>
+    <h1>{{ rows | length }} record{{ '' if rows | length == 1 else 's' }} need a {{ field | replace('_', ' ') }}.</h1>
     <div class="when">
       {{ question }}
       {% if remaining > rows | length %}

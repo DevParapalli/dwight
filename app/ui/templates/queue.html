@@ -8,8 +8,8 @@
 
 <div class="page-head">
   <div>
-    <div class="eyebrow">( <b>QUESTIONS</b> · {{ groups | length }} KINDS )</div>
-    <h1>{{ total }} thing{{ '' if total == 1 else 's' }} the agent <em class="serif-em">won't</em> decide.</h1>
+    <div class="index-line"><span class="n">QUESTIONS</span><span class="t">{{ groups | length }} KINDS</span></div>
+    <h1>{{ total }} thing{{ '' if total == 1 else 's' }} the agent won't decide.</h1>
     <div class="when" aria-live="polite">{{ resolved_count }} already answered. Answering one can close every similar case at once.</div>
   </div>
 </div>

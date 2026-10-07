@@ -16,7 +16,7 @@
 
 <div class="page-head">
   <div>
-    <div class="eyebrow">( <b>RUN</b> · <span id="stage-word">{{ stage | upper }}</span> )</div>
+    <div class="index-line"><span class="n">RUN</span><span class="t"><span id="stage-word">{{ stage | upper }}</span></span></div>
     <h1 id="headline">{{ status.message }}</h1>
     <div class="when" id="doing">
       {% if is_active %}Working.{% else %}Nothing running.{% endif %}

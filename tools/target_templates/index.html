@@ -5,8 +5,8 @@
 
 <div class="page-head">
   <div>
-    <div class="eyebrow">( <b>TARGET</b> · EMPLOYEE MASTER )</div>
-    <h1>What this system <em class="serif-em">holds.</em></h1>
+    <div class="index-line"><span class="n">TARGET</span><span class="t">EMPLOYEE MASTER</span></div>
+    <h1>What this system holds.</h1>
     <div class="when">
       {% if q %}{{ "{:,}".format(matching) }} of {{ "{:,}".format(total) }} match “{{ q }}”
       {% else %}every record accepted through the employee API{% endif %}
