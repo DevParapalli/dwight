@@ -311,7 +311,8 @@ def reconcile_run(run_id: str, schema: Schema, policy: dict) -> None:
                 prior = prior_dupe_calls.get(signature("DUPE_AMBIGUOUS", scope_key))
                 if prior is not None:
                     # Already answered in an earlier run -- honour it instead of asking again.
-                    if prior.get("action") == "approve":
+                    # The chosen value decides; approving the proposal means keep_separate.
+                    if prior.get("action") != "reject" and prior.get("value") == "merge":
                         uf.union(a_id, b_id)
                     continue
 

@@ -1,10 +1,12 @@
 import json
+import re
 
 from app.agent.decisions import record_decision
 from app.agent.escalate import create_or_merge_escalation
 from app.agent.policy import load_policy
 from app.agent.validate import rule_issues
 from app.audit import record_change, utcnow
+from app.db import new_id
 from app.schema.loader import load_schema
 from app.settings import settings
 
@@ -120,10 +122,74 @@ def _apply_push_repair(conn, escalation, action: str, value: str | None) -> None
 # Only reason codes whose answer can be applied to the already-processed run
 # in place. Everything else is recorded as a decision and takes effect on the
 # next pass, which is what PLAN.md's Learning section describes.
+def _number_shape(key: str | None) -> str:
+    return re.sub(r"[A-Za-z]", "A", re.sub(r"\d", "9", key or ""))
+
+
+def _current_record(conn, record_id: str) -> str:
+    """The record that now stands for this one: itself, or the survivor it was
+    merged into while reconciling."""
+    seen = {record_id}
+    while (row := conn.execute("SELECT survivor_record_id FROM merges WHERE absorbed_record_id = ?",
+                               (record_id,)).fetchone()) and row["survivor_record_id"] not in seen:
+        record_id = row["survivor_record_id"]
+        seen.add(record_id)
+    return record_id
+
+
+def _apply_duplicate(conn, escalation, action: str, value: str | None) -> None:
+    """A pair a person called one employee is merged now, so the copy is not
+    pushed in this run. Either side may already stand inside a merged record,
+    so the merge is between the records that now represent them. The survivor
+    is the one whose employee id is written the way the rest of its export
+    writes them -- the copy can come first in the file -- and it is kept as it
+    is; nothing is combined across the two."""
+    if action == "reject" or value != "merge":
+        return
+    ids = {_current_record(conn, rid) for rid in escalation["entity_id"].split(":")}
+    if len(ids) != 2:
+        return
+    pair = conn.execute(
+        "SELECT id, status, natural_key, source_file_id, created_at FROM records WHERE id IN (?, ?)",
+        tuple(ids),
+    ).fetchall()
+    if len(pair) != 2 or any(r["status"] == "merged" for r in pair):
+        return
+
+    def usual(record) -> int:
+        keys = conn.execute("SELECT natural_key FROM records WHERE run_id = ? AND source_file_id = ?",
+                            (escalation["run_id"], record["source_file_id"])).fetchall()
+        return sum(_number_shape(k["natural_key"]) == _number_shape(record["natural_key"]) for k in keys)
+
+    survivor, absorbed = sorted(pair, key=lambda r: (-usual(r), r["created_at"], r["id"]))
+    now = utcnow()
+    # A survivor still waiting on another question keeps waiting; only a clean
+    # one changes status.
+    conn.execute("UPDATE records SET status = 'merged_survivor', updated_at = ? WHERE id = ? AND status = 'clean'",
+                 (now, survivor["id"]))
+    conn.execute("UPDATE records SET status = 'merged', updated_at = ? WHERE id = ?", (now, absorbed["id"]))
+    conn.execute(
+        "UPDATE escalations SET status = 'superseded', resolved_at = ? WHERE entity_id = ? AND status = 'open'",
+        (now, absorbed["id"]),
+    )
+    conn.execute(
+        "INSERT INTO merges (id, run_id, survivor_record_id, absorbed_record_id, score, field_survivorship, "
+        "created_at) VALUES (?, ?, ?, ?, 1.0, '{}', ?)",
+        (new_id(), escalation["run_id"], survivor["id"], absorbed["id"], now),
+    )
+    record_change(
+        conn, run_id=escalation["run_id"], actor="human", stage="resolved",
+        reason_code="DUPE_AMBIGUOUS", entity_type="record", entity_id=absorbed["id"],
+        field="duplicate_of", before=None, after=survivor["id"],
+        note="a person confirmed these are one employee; merged, not pushed separately",
+    )
+
+
 _APPLIERS = {
     "MAP_AMBIGUOUS": _apply_mapping,
     "MAP_UNMAPPED": _apply_mapping,
     "PUSH_REJECTED": _apply_push_repair,
+    "DUPE_AMBIGUOUS": _apply_duplicate,
 }
 
 

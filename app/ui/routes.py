@@ -1298,14 +1298,29 @@ async def view_queue(request: Request, run_id: str):
     )
 
 
+def _answer(conn, escalation_id: str, action: str, value: str) -> tuple[str, str | None]:
+    """What the card's single Approve meant. Its control starts on the proposal,
+    so an unchanged value is approving the proposal -- which keeps each similar
+    question's own proposal under apply to all -- and a changed one is the
+    person's answer. Reject ignores whatever the control held."""
+    if action == "reject":
+        return action, None
+    suggested = conn.execute("SELECT suggested_value FROM escalations WHERE id = ?",
+                             (escalation_id,)).fetchone()
+    if action == "approve" and value and value != (suggested["suggested_value"] if suggested else None):
+        return "edit", value
+    return action, None if action == "approve" else (value or None)
+
+
 @router.post("/runs/{run_id}/escalations/{escalation_id}/resolve")
 async def resolve_escalation_route(
     run_id: str, escalation_id: str,
     action: str = Form(...), value: str = Form(""), apply_to_all: str = Form(""),
 ):
     with connect() as conn:
+        action, value = _answer(conn, escalation_id, action, value)
         resolve_escalation(
-            conn, run_id, escalation_id, action=action, value=value or None,
+            conn, run_id, escalation_id, action=action, value=value,
             apply_to_all=bool(apply_to_all),
         )
 

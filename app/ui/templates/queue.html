@@ -163,10 +163,17 @@
         {% endif %}
       </div>
 
+      {# A question with a fixed set of answers gets one button per answer.
+         Anything else gets the proposal pre-filled and one Approve, which
+         sends whatever the control holds: unchanged is the proposal, changed
+         is the person's own answer. #}
+      {% set choices = card.options if card.reason_code in ("DUPE_AMBIGUOUS", "DATE_FORMAT_AMBIGUOUS") else [] %}
       <form method="post" action="/runs/{{ run_id }}/escalations/{{ card.id }}/resolve">
-        {% if not card.fill_field %}
+        {% if choices %}
+        <input type="hidden" name="action" value="approve">
+        {% elif not card.fill_field %}
         <div class="field">
-          <label for="value-{{ card.id }}">Refine before saving</label>
+          <label for="value-{{ card.id }}">Your answer</label>
           {% if card.reason_code in ("MAP_AMBIGUOUS", "MAP_UNMAPPED") %}
           <span class="selwrap">
             <select id="value-{{ card.id }}" name="value">
@@ -193,10 +200,9 @@
                  value="{{ card.suggested_value or '' }}"
                  placeholder="{{ card.suggested_action }}">
           {% endif %}
-          <span class="help">Pre-filled with what the agent proposed. Change it and use Save edit, or approve it as-is.</span>
+          <span class="help">Pre-filled with the agent's proposal. Change it before approving to use your own.</span>
         </div>
         {% endif %}
-
         {% if card.fill_field and card.similar_count > 1 %}
         {# The button on this card says "Approve all N", so the form has to mean
            it. The checkbox below is for cards where one answer is genuinely one
@@ -234,16 +240,17 @@
       {% endif %}
 
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          {% if choices %}
+          {% for option in choices %}
+          <button class="btn {{ 'btn-primary' if option == card.suggested_value else 'btn-glass' }} btn-sm"
+                  type="submit" name="value" value="{{ option }}">{{ option | replace('_', ' ') | capitalize }}</button>
+          {% endfor %}
+          {% elif card.fill_field %}
           {% if card.suggested_value %}
           <button class="btn btn-primary btn-sm" type="submit" name="action" value="approve">
-            {# Only a refusal gives each row its own correction, so only there is
-               naming one value misleading. Everywhere else, say what is being
-               approved. #}
-            {% if card.fill_field %}Approve all {{ "{:,}".format(card.rows_affected) }}
-            {% else %}Approve: {{ card.suggested_value }}{% endif %}
+            Approve all {{ "{:,}".format(card.rows_affected) }}
           </button>
           {% endif %}
-          {% if card.fill_field %}
           {# Always available, even when there is a proposal: approving in one
              click is for when you trust it, this is for when you want to see it. #}
           <a class="btn {{ 'btn-glass' if card.suggested_value else 'btn-primary' }} btn-sm"
@@ -251,12 +258,11 @@
             {% if card.suggested_value %}Review {{ "{:,}".format(card.rows_affected) }} row{{ '' if card.rows_affected == 1 else 's' }}
             {% else %}Fill in {{ "{:,}".format(card.rows_affected) }} {{ card.fill_field | replace('_', ' ') }}{{ '' if card.rows_affected == 1 else 's' }}{% endif %}
           </a>
-          {% elif card.suggested_value %}
-          <button class="btn btn-glass btn-sm" type="submit" name="action" value="edit">Save my change</button>
-          {% else %}
-          <button class="btn btn-primary btn-sm" type="submit" name="action" value="edit">Save my choice</button>
-          {% endif %}
           <button class="btn btn-ghost btn-sm" type="submit" name="action" value="reject">Reject</button>
+          {% else %}
+          <button class="btn btn-primary btn-sm" type="submit" name="action" value="approve">Approve</button>
+          <button class="btn btn-ghost btn-sm" type="submit" name="action" value="reject">Reject</button>
+          {% endif %}
         </div>
       </form>
     </div>
