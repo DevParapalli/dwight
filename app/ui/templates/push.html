@@ -35,23 +35,7 @@
   </div>
 </div>
 
-<div class="mosaic">
-  <div class="kpi m-4">
-    <div class="k-label">( ACCEPTED )</div>
-    <div class="k-val">{{ "{:,}".format(succeeded) }}</div>
-    <div class="k-foot"><span>employees in the target</span></div>
-  </div>
-  <div class="kpi m-4">
-    <div class="k-label">( REFUSED )</div>
-    <div class="k-val">{{ "{:,}".format(rejected) }}</div>
-    <div class="k-foot"><span>a rule the agent cannot know</span></div>
-  </div>
-  <div class="kpi m-4">
-    <div class="k-label">( RETRIES )</div>
-    <div class="k-val">{{ "{:,}".format(retried) }}</div>
-    <div class="k-foot"><span>transient failures absorbed</span></div>
-  </div>
-</div>
+{% include "_progress.html" %}
 
 {% if open_escalations %}
 <div class="card">

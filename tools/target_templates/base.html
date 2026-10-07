@@ -49,6 +49,9 @@
       font: 400 12px var(--font-mono); color: var(--ink-mid);
       overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
     }
+    main > * + * { margin-top: var(--sp-6); }
+    .held .k-val { font-size: clamp(56px, 8vw, 96px); font-weight: 600; color: var(--accent); }
+    .held code { font-family: var(--font-mono); color: var(--ink-mid); }
     .pager { display: flex; gap: 10px; align-items: center; margin-top: 16px; }
     .pager .count { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--ink-low); }
   </style>

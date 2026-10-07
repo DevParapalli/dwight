@@ -1,4 +1,5 @@
-{# Every ticker frame already carries done/total; it was only ever rendered as a
+{# A stage frame can carry a total before any record is done, so done defaults
+   to 0. Every ticker frame already carries done/total; it was only ever rendered as a
    small chip beside the message. A run that is working should say so where you
    are looking, not in the newest line of a list. #}
 {% set last_progress = (frames | selectattr('detail.total') | list | last) %}
@@ -9,11 +10,11 @@
       {{ last_progress.detail.what if last_progress else 'Working' }}
     </span>
     <span class="runbar-count t-data" id="runbar-count">
-      {%- if last_progress %}{{ "{:,}".format(last_progress.detail.done) }} of {{ "{:,}".format(last_progress.detail.total) }}{% endif -%}
+      {%- if last_progress %}{{ "{:,}".format(last_progress.detail.done or 0) }} of {{ "{:,}".format(last_progress.detail.total) }}{% endif -%}
     </span>
   </div>
   <progress id="runbar-bar" class="runbar-bar"
-    {%- if last_progress %} value="{{ last_progress.detail.done }}" max="{{ last_progress.detail.total }}"{% endif %}>
+    {%- if last_progress %} value="{{ last_progress.detail.done or 0 }}" max="{{ last_progress.detail.total }}"{% endif %}>
   </progress>
 </div>
 
@@ -26,7 +27,7 @@
     <time class="act-time" datetime="{{ f.ts }}">{{ f.ts[11:16] }}</time>
     <span class="act-dot" aria-hidden="true"></span>
     <span class="act-msg">{{ f.message }}</span>
-    {% if f.detail.get('total') %}<span class="chip-f">{{ f.detail.done }}/{{ f.detail.total }}</span>{% endif %}
+    {% if f.detail.get('total') and f.detail.get('done') is not none %}<span class="chip-f">{{ f.detail.done }}/{{ f.detail.total }}</span>{% endif %}
   </li>
   {% else %}
   {% if is_active %}
@@ -109,7 +110,7 @@
       node.querySelector('.act-msg').textContent = frame.message;
 
       var chip = node.querySelector('.chip-f');
-      if (frame.detail && frame.detail.total) {
+      if (frame.detail && frame.detail.total && frame.detail.done != null) {
         chip.textContent = frame.detail.done + '/' + frame.detail.total;
         chip.hidden = false;
       }
@@ -177,6 +178,7 @@
       }
 
       if (window.dwightOnSnapshot) { window.dwightOnSnapshot(snap); }
+      if (window.dwightRenderProgress) { window.dwightRenderProgress(snap.progress); }
     });
 
     source.onopen = function () { if (liveWord) { liveWord.textContent = 'live'; } };

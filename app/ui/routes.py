@@ -372,11 +372,6 @@ REASON_CODE_HELP = {
     },
 }
 
-# Every status the pipeline can put a record in, in reading order. The overview
-# renders a tile for all of them from the first paint, including the ones still
-# at zero -- otherwise tiles appear one at a time as each status first occurs and
-# the page visibly reflows while the run works.
-RECORD_STATUS_ORDER = ["clean", "merged_survivor", "merged", "blocked", "incomplete", "pending"]
 AUDIT_PAGE_SIZE = 200
 
 _AUDIT_COLUMNS = [
@@ -418,6 +413,57 @@ def open_question_count(run_id: str) -> int:
         ).fetchone()["n"]
 
 
+RECORD_BUCKETS = [
+    ("target", "In the target system"),
+    ("merged", "Merged into another record"),
+    ("held", "Held back, not sent"),
+    ("waiting", "Waiting on you"),
+    ("ready", "Not yet pushed"),
+]
+
+
+def record_progress(run_id: str) -> dict:
+    """Where every source record is now. Each record is in exactly one bucket,
+    so the buckets always add up to the records read; "accounted for" is the
+    share whose outcome is final."""
+    with connect() as conn:
+        records = conn.execute("SELECT id, status, blocked_on FROM records WHERE run_id = ?",
+                               (run_id,)).fetchall()
+        pushed = {r["record_id"] for r in conn.execute(
+            "SELECT DISTINCT record_id FROM push_attempts WHERE run_id = ? AND outcome = 'success'", (run_id,))}
+        open_rows = conn.execute("SELECT reason_code, entity_id FROM escalations "
+                                 "WHERE run_id = ? AND status = 'open'", (run_id,)).fetchall()
+    # Record and pair questions name their records; class questions (a value
+    # nobody could normalise, say) are matched through the reason the record is
+    # blocked on.
+    asked = {part for e in open_rows if e["entity_id"] for part in e["entity_id"].split(":")}
+    open_codes = {e["reason_code"] for e in open_rows}
+
+    counts = dict.fromkeys([key for key, _ in RECORD_BUCKETS], 0)
+    for r in records:
+        if r["status"] == "merged":
+            counts["merged"] += 1
+        elif r["id"] in pushed:
+            counts["target"] += 1
+        elif r["id"] in asked or (r["status"] == "blocked" and r["blocked_on"] in open_codes):
+            counts["waiting"] += 1
+        elif r["status"] in ("blocked", "incomplete"):
+            counts["held"] += 1
+        else:
+            counts["ready"] += 1
+
+    total = len(records)
+    def pct(n: int) -> float:
+        return round(100 * n / total, 1) if total else 0.0
+    final = counts["target"] + counts["merged"] + counts["held"]
+    return {
+        "total": total,
+        "accounted_pct": pct(final),
+        "buckets": [{"key": key, "label": label, "n": counts[key], "pct": pct(counts[key])}
+                    for key, label in RECORD_BUCKETS],
+    }
+
+
 def _run_snapshot(run_id: str) -> dict:
     with connect() as conn:
         run = conn.execute("SELECT stage FROM runs WHERE id = ?", (run_id,)).fetchone()
@@ -433,6 +479,7 @@ def _run_snapshot(run_id: str) -> dict:
         "records": {r["status"]: r["n"] for r in records},
         "open_escalations": open_question_count(run_id),
         "pushed": pushed,
+        "progress": record_progress(run_id),
     }
 
 
@@ -666,6 +713,7 @@ async def view_push(request: Request, run_id: str):
         request, "push.html",
         {
             "run_id": run_id,
+            "progress": record_progress(run_id),
             "stage": run["stage"] if run else "unknown",
             "by_outcome": [dict(r) for r in by_outcome],
             "by_status": [dict(r) for r in by_status],
@@ -1271,24 +1319,10 @@ async def resolve_escalation_route(
     return RedirectResponse(url=f"/runs/{run_id}/queue", status_code=303)
 
 
-def _status_tiles(rows) -> list[dict]:
-    """One tile per known status in a fixed order, so the mosaic keeps its shape
-    while the numbers fill in. Any status not on the list still gets a tile."""
-    counts = {r["status"]: r["n"] for r in rows}
-    tiles = [{"status": status, "n": counts.pop(status, 0)} for status in RECORD_STATUS_ORDER]
-    tiles.extend({"status": status, "n": n} for status, n in counts.items())
-    # 'pending' is an implementation detail of a row mid-flight; show it only if
-    # rows are actually sitting in it.
-    return [t for t in tiles if t["status"] != "pending" or t["n"]]
-
-
 @router.get("/runs/{run_id}")
 async def run_summary(request: Request, run_id: str):
     with connect() as conn:
         run = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        record_counts = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM records WHERE run_id = ? GROUP BY status", (run_id,)
-        ).fetchall()
         # Distinct questions, matching the queue and the nav badge. Counting
         # escalation rows here instead said "80 LOGIC_CONTRADICTION" while the
         # queue showed three cards, which is the same number told two ways.
@@ -1309,8 +1343,8 @@ async def run_summary(request: Request, run_id: str):
         request, "run_summary.html",
         {
             "run_id": run_id,
+            "progress": record_progress(run_id),
             "stage": run["stage"] if run else "unknown",
-            "record_counts": _status_tiles(record_counts),
             "escalations": [dict(r) for r in escalations],
             "merge_count": merge_count,
             "is_active": (run["stage"] if run else "unknown") in ACTIVE_STAGES,

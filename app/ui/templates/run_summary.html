@@ -33,21 +33,7 @@
   </div>
 </div>
 
-<div class="mosaic" id="counters">
-  {% for r in record_counts %}
-  <div class="kpi m-3" data-status="{{ r.status }}">
-    <div class="k-label">( {{ r.status | upper | replace('_', ' ') }} )</div>
-    <div class="k-val">{{ "{:,}".format(r.n) }}</div>
-    <div class="k-foot"><span>
-      {%- if r.status == 'merged' %}absorbed into other records
-      {%- elif r.status == 'merged_survivor' %}one per person, after merging
-      {%- elif r.status == 'blocked' %}waiting on a decision
-      {%- elif r.status == 'incomplete' %}missing a required field
-      {%- else %}records{% endif -%}
-    </span></div>
-  </div>
-  {% endfor %}
-</div>
+{% include "_progress.html" %}
 
 <div class="cols-main">
   <div class="stack">
@@ -111,16 +97,10 @@
   (function () {
     var doing = document.getElementById('doing');
     var stageWord = document.getElementById('stage-word');
-    var counters = document.getElementById('counters');
     var lastStage = {{ stage | tojson }};
 
     window.dwightOnSnapshot = function (s) {
       if (stageWord) { stageWord.textContent = (s.stage || '').toUpperCase(); }
-
-      Object.keys(s.records).forEach(function (status) {
-        var tile = counters.querySelector('[data-status="' + status + '"] .k-val');
-        if (tile) { tile.textContent = s.records[status].toLocaleString(); }
-      });
 
       // The stage changed, so the server-rendered actions and headline are now
       // stale. Reload once, quietly, instead of re-implementing that logic here.

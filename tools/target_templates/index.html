@@ -26,6 +26,13 @@
   </div>
 </div>
 
+{# The one number to read before and after a push: what the target holds. #}
+<div class="kpi held">
+  <div class="k-label">( EMPLOYEES HELD )</div>
+  <div class="k-val">{{ "{:,}".format(total) }}</div>
+  <div class="k-foot"><span>Accepted over <code>POST /v1/employees</code>. Nothing else writes here.</span></div>
+</div>
+
 <div class="card">
   <header>
     <h3>Employees</h3>

@@ -218,3 +218,45 @@
 
 /* A submitted button that is waiting on the server. */
 .btn[aria-busy="true"] { opacity: .75; cursor: progress; }
+
+/* -- source-record progress ------------------------------------ */
+.srcbar-head { display: flex; align-items: flex-end; gap: 24px; flex-wrap: wrap; margin-bottom: 18px; }
+.srcbar-title { margin: 6px 0 0; font-size: clamp(18px, 2.2vw, 24px); color: var(--ink-mid); }
+.srcbar-title b { color: var(--ink-hi); font-weight: 600; }
+.srcbar-pct { margin-left: auto; text-align: right; line-height: 1; }
+.srcbar-pct span { display: block; font-size: clamp(34px, 4.4vw, 52px); font-weight: 600; color: var(--mint); }
+.srcbar-pct small { font: 500 11px var(--font-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-low); }
+
+.srcbar-bar {
+  display: flex; height: 22px; border-radius: 999px; overflow: hidden;
+  background: var(--glass-2); border: 1px solid var(--hairline);
+}
+/* Deliberately past Proxima's motion rule (0.2s, no width): on a recorded demo
+   the bar growing is the point. Dwight only; reduced motion turns it off. */
+.srcbar-seg { height: 100%; transition: width .6s ease; animation: srcbar-grow 1s cubic-bezier(.2, .7, .2, 1) both; }
+.srcbar-seg:nth-child(2) { animation-delay: .1s; } .srcbar-seg:nth-child(3) { animation-delay: .2s; }
+.srcbar-seg:nth-child(4) { animation-delay: .3s; } .srcbar-seg:nth-child(5) { animation-delay: .4s; }
+@keyframes srcbar-grow { from { width: 0; } }
+@media (prefers-reduced-motion: reduce) { .srcbar-seg { transition: none; animation: none; } }
+
+.seg-target { background: var(--mint); }
+.seg-merged { background: var(--sky); }
+.seg-held { background: var(--ink-low); }
+.seg-waiting { background: var(--amber); }
+.seg-ready { background: var(--accent); opacity: .45; }
+
+.srcbar-legend {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px 24px; margin: 18px 0 0;
+}
+.srcbar-legend dt { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-mid); }
+.srcbar-legend dd { margin: 4px 0 0 18px; font-family: var(--font-mono); font-size: 13px; color: var(--ink-low); }
+.srcbar-legend dd b { color: var(--ink-hi); font-size: 18px; font-weight: 600; margin-right: 4px; }
+.srcbar-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+/* -- breathing room -------------------------------------------- */
+/* Top-level blocks on a page sat flush against each other. The page head
+   already carries its own bottom margin, so the block after it is left alone. */
+.main > * + * { margin-top: var(--sp-6); }
+.main > .page-head + * { margin-top: 0; }
+.stack, .cols-main, .mosaic { gap: var(--sp-5); }

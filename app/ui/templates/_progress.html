@@ -1,0 +1,70 @@
+{# Where every source record is, as one bar. The buckets always add up to the
+   records read, so "100% accounted for" is a claim a viewer can check by eye.
+   Server-rendered; the live feed only refreshes the numbers. #}
+{% set target = progress.buckets[0] %}
+<section class="card srcbar" id="progress" aria-labelledby="progress-title">
+  <div class="srcbar-head">
+    <div>
+      <div class="t-label">( SOURCE RECORDS )</div>
+      <p class="srcbar-title" id="progress-title">
+        {% if progress.total %}
+        <b data-progress="target">{{ "{:,}".format(target.n) }}</b> of
+        <b data-progress="total">{{ "{:,}".format(progress.total) }}</b> source records are in the target system
+        {% else %}
+        Reading the exports…
+        {% endif %}
+      </p>
+    </div>
+    <div class="srcbar-pct">
+      <span data-progress="accounted">{{ progress.accounted_pct | round | int }}%</span>
+      <small>accounted for</small>
+    </div>
+  </div>
+
+  <div class="srcbar-bar" aria-hidden="true">
+    {% for b in progress.buckets %}
+    <span class="srcbar-seg seg-{{ b.key }}" data-seg="{{ b.key }}" style="width: {{ b.pct }}%"></span>
+    {% endfor %}
+  </div>
+
+  <dl class="srcbar-legend">
+    {% for b in progress.buckets %}
+    <div>
+      <dt><i class="srcbar-swatch seg-{{ b.key }}" aria-hidden="true"></i>{{ b.label }}</dt>
+      <dd><b data-n="{{ b.key }}">{{ "{:,}".format(b.n) }}</b> <span data-p="{{ b.key }}">{{ b.pct }}%</span></dd>
+    </div>
+    {% endfor %}
+  </dl>
+</section>
+
+<script>
+  // The percentage counts up while the bar grows, over the same second.
+  (function () {
+    var el = document.querySelector('#progress [data-progress="accounted"]');
+    var target = parseFloat(el && el.textContent);
+    if (!el || !target || window.matchMedia('(prefers-reduced-motion: reduce)').matches) { return; }
+    var t0 = performance.now();
+    var step = function (now) {
+      var k = Math.min(1, (now - t0) / 1000), eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = Math.round(target * eased) + '%';
+      if (k < 1) { requestAnimationFrame(step); }
+    };
+    el.textContent = '0%';
+    requestAnimationFrame(step);
+  })();
+
+  window.dwightRenderProgress = function (progress) {
+    var root = document.getElementById('progress');
+    if (!root || !progress || !progress.total) { return; }
+    var set = function (sel, text) { var el = root.querySelector(sel); if (el) { el.textContent = text; } };
+    set('[data-progress="total"]', progress.total.toLocaleString());
+    set('[data-progress="accounted"]', Math.round(progress.accounted_pct) + '%');
+    progress.buckets.forEach(function (b) {
+      if (b.key === 'target') { set('[data-progress="target"]', b.n.toLocaleString()); }
+      set('[data-n="' + b.key + '"]', b.n.toLocaleString());
+      set('[data-p="' + b.key + '"]', b.pct + '%');
+      var seg = root.querySelector('[data-seg="' + b.key + '"]');
+      if (seg) { seg.style.width = b.pct + '%'; }
+    });
+  };
+</script>
