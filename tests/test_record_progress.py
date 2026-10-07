@@ -1,3 +1,5 @@
+import json
+
 from app.db import connect, init_db
 from app.settings import settings
 from app.ui.routes import record_progress
@@ -49,3 +51,30 @@ def test_every_record_lands_in_exactly_one_bucket(tmp_path, monkeypatch):
     assert sum(counts.values()) == progress["total"] == 8
     # Final outcomes only: target, merged and held back.
     assert progress["accounted_pct"] == 50.0
+
+
+def test_unchanged_record_skipped_by_a_later_push_is_in_the_target(tmp_path, monkeypatch):
+    from app.agent.push import _payload_hash
+
+    monkeypatch.setattr(settings, "db_path", tmp_path / "t.db")
+    init_db()
+    same, changed = {"employee_id": "E1", "first_name": "Asha"}, {"employee_id": "E2", "first_name": "Ravi"}
+    with connect() as conn:
+        conn.execute("INSERT INTO runs VALUES ('run2', 1, '', 'reconciled', ?, ?)", (T, T))
+        conn.execute("INSERT INTO source_files VALUES ('f', 'run2', 'legacy_hris_employees.csv', 'csv', 2, ?)", (T,))
+        for rid, data in (("r1", same), ("r2", changed)):
+            conn.execute("INSERT INTO records (id, run_id, source_file_id, natural_key, data, status, created_at, "
+                         "updated_at) VALUES (?, 'run2', 'f', ?, ?, 'clean', ?, ?)",
+                         (rid, data["employee_id"], json.dumps(data), T, T))
+        # An earlier run pushed E1 with these values and E2 with older ones.
+        conn.execute("INSERT INTO pushed_state VALUES ('E1', ?, 'run1', ?)", (_payload_hash(same), T))
+        conn.execute("INSERT INTO pushed_state VALUES ('E2', 'stale', 'run1', ?)", (T,))
+
+    def counts():
+        return {b["key"]: b["n"] for b in record_progress("run2")["buckets"]}
+
+    # Before this run pushes, both are still to be sent.
+    assert counts()["ready"] == 2
+    with connect() as conn:
+        conn.execute("UPDATE runs SET stage = 'done' WHERE id = 'run2'")
+    assert (counts()["target"], counts()["ready"]) == (1, 1)

@@ -19,7 +19,7 @@ from app import progress
 from app.agent.clean import coerce_user_value
 from app.agent.instruct import interpret_bulk_instruction
 from app.agent.policy import RULE_DESCRIPTIONS, load_policy
-from app.agent.push import push_run, rollback_run
+from app.agent.push import _payload_hash, push_run, rollback_run
 from app.agent.resolve import resolve_escalation
 from app.agent.runner import advance_run, mapping_gate_is_open, run_status
 from app.audit import record_change, utcnow
@@ -427,12 +427,28 @@ def record_progress(run_id: str) -> dict:
     so the buckets always add up to the records read; "accounted for" is the
     share whose outcome is final."""
     with connect() as conn:
-        records = conn.execute("SELECT id, status, blocked_on FROM records WHERE run_id = ?",
+        records = conn.execute("SELECT id, status, blocked_on, natural_key, data FROM records WHERE run_id = ?",
                                (run_id,)).fetchall()
         pushed = {r["record_id"] for r in conn.execute(
             "SELECT DISTINCT record_id FROM push_attempts WHERE run_id = ? AND outcome = 'success'", (run_id,))}
+        stage = conn.execute("SELECT stage FROM runs WHERE id = ?", (run_id,)).fetchone()
+        # A later batch skips an employee the target already holds with exactly
+        # these values: no request is made, and the record is in the target all
+        # the same. Only checked once this run has pushed.
+        held = ({r["employee_id"]: r["payload_hash"] for r in conn.execute(
+                    "SELECT employee_id, payload_hash FROM pushed_state")}
+                if stage and stage["stage"] in ("pushing", "done") else {})
         open_rows = conn.execute("SELECT reason_code, entity_id FROM escalations "
                                  "WHERE run_id = ? AND status = 'open'", (run_id,)).fetchall()
+
+    def in_target(r) -> bool:
+        if r["id"] in pushed:
+            return True
+        if not held or r["status"] not in ("clean", "merged_survivor"):
+            return False
+        data = json.loads(r["data"])
+        return held.get(data.get("employee_id") or r["natural_key"]) == _payload_hash(data)
+
     # Record and pair questions name their records; class questions (a value
     # nobody could normalise, say) are matched through the reason the record is
     # blocked on.
@@ -443,7 +459,7 @@ def record_progress(run_id: str) -> dict:
     for r in records:
         if r["status"] == "merged":
             counts["merged"] += 1
-        elif r["id"] in pushed:
+        elif in_target(r):
             counts["target"] += 1
         elif r["id"] in asked or (r["status"] == "blocked" and r["blocked_on"] in open_codes):
             counts["waiting"] += 1
