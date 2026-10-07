@@ -34,6 +34,10 @@ demo rows="1500":
     @echo "  browser:     http://127.0.0.1:8000  -> upload all three files in data/samples/"
     @echo "  after push:  just measure"
 
+# Run the agent on :8000 with model calls off; stored rules only
+auto:
+    DWIGHT_MODE=automation uv run uvicorn app.main:app
+
 # Score the last run against the generator's ground-truth manifest.
 measure:
     uv run tools/measure_escalations.py --json data/samples/measurement.json

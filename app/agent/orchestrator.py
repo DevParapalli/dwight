@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app.agent.clean import clean_string, coerce_enum
 from app.agent.escalate import create_or_merge_escalation
-from app.agent.mapper import propose_mapping
+from app.agent.mapper import MappingProposal, propose_mapping
 from app.agent.normalize_llm import normalize_values
 from app.agent.policy import decide_mapping
 from app.agent.validate import validate_and_clean_record
@@ -13,6 +13,29 @@ from app.ingest.profile import profile_table
 from app.ingest.readers import load_source_table
 from app.progress import Ticker, emit
 from app.schema.loader import Schema
+
+
+def learned_mapping(filename: str, column: str) -> MappingProposal | None:
+    """A column mapping accepted on an earlier batch of the same export is a
+    rule, not a question: the same header in the same file means the same field.
+    This is what lets a change batch map with no model at all."""
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT m.target_field, m.run_id FROM mappings m
+               JOIN source_columns sc ON sc.id = m.source_column_id
+               JOIN source_files sf ON sf.id = sc.source_file_id
+               WHERE sf.filename = ? AND sc.name = ? AND m.status IN ('accepted', 'overridden')
+                 AND m.target_field IS NOT NULL
+               ORDER BY m.created_at DESC LIMIT 1""",
+            (filename, column),
+        ).fetchone()
+    if row is None:
+        return None
+    return MappingProposal(
+        target_field=row["target_field"], confidence=1.0,
+        rationale=f"rule: accepted for this column on run {row['run_id'][:8]}",
+        alternatives=[], source="rule", model=None, latency_ms=0, cache_hit=True,
+    )
 
 
 def ingest_and_map(run_id: str, source_paths: list[Path], schema: Schema, policy: dict) -> None:
@@ -39,12 +62,13 @@ def ingest_and_map(run_id: str, source_paths: list[Path], schema: Schema, policy
             )
 
         for index, profile in enumerate(profiles, start=1):
-            proposal = propose_mapping(profile, schema)
+            proposal = learned_mapping(table.filename, profile.name) or propose_mapping(profile, schema)
             emit(run_id, "llm",
                  (f"{profile.name!r} -> "
                   + (f"{proposal.target_field} at {proposal.confidence:.0%} confidence"
                      if proposal.target_field else "no target field")
-                  + (" (from cache)" if proposal.cache_hit
+                  + (" (rule from an earlier batch)" if proposal.source == "rule"
+                     else " (from cache)" if proposal.cache_hit
                      else f" ({proposal.latency_ms / 1000:.1f}s)" if proposal.source == "llm"
                      else " (name similarity, no model configured)")),
                  stage="mapped", what="column mapping", model=proposal.model,

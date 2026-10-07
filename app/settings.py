@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,6 +15,13 @@ class Settings(BaseSettings):
     # you want between test runs and never what you want otherwise, so it is off
     # unless asked for and the route does not exist when it is off.
     enable_nuke: bool = False
+
+    # "agent": the model proposes, a person answers the queue, and every answer
+    # is stored as a decision. "automation": the model is switched off and the
+    # stored decisions and cached answers are the only rules; anything they do
+    # not cover is escalated for the agent and a person. Change-data-capture
+    # batches run in automation mode.
+    dwight_mode: Literal["agent", "automation"] = "agent"
 
     groq_env_key: str | None = None
     groq_model: str = "qwen/qwen3.8-27b"

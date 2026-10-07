@@ -222,6 +222,11 @@ def complete_json(system_prompt: str, user_prompt: str, max_tokens: int | None =
     waited out rather than escaped, because that one resolves by itself, and a
     bad request still fails loudly rather than being retried elsewhere.
     """
+    if settings.dwight_mode == "automation":
+        # Automation runs on stored decisions and cached answers only. Every
+        # caller already treats LLMNotConfigured as "escalate instead", so a
+        # case the rules do not cover becomes a question rather than a guess.
+        raise LLMNotConfigured("automation mode: model calls disabled")
     budget = max_tokens or settings.llm_max_output_tokens
     chain = groq_chain()
 

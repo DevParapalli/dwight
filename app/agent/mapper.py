@@ -30,7 +30,7 @@ class MappingProposal:
     confidence: float
     rationale: str
     alternatives: list[dict]
-    source: str  # "llm" | "deterministic_fallback"
+    source: str  # "llm" | "deterministic_fallback" | "rule"
     model: str | None
     latency_ms: int
     cache_hit: bool
