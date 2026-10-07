@@ -125,7 +125,11 @@ def ingest_and_map(run_id: str, source_paths: list[Path], schema: Schema, policy
                 done=index, total=len(profiles), reason_code=decision.reason_code,
                 cached=proposal.cache_hit, model=proposal.model,
             )
-            if proposal.target_field and schema.fields[proposal.target_field].type == "date":
+            # Only a mapping already settled is scanned. A doubtful one may not be
+            # a date at all (an id column scored against hire_date), and its dates
+            # are asked about during validation once a person has mapped it.
+            if (status == "accepted" and proposal.target_field
+                    and schema.fields[proposal.target_field].type == "date"):
                 date_columns[profile.name] = proposal.target_field
 
         _ask_date_questions(run_id, table, file_id, date_columns, schema, policy)

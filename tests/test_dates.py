@@ -70,3 +70,27 @@ def test_gate_asks_one_question_per_column(tmp_path, monkeypatch):
     with connect() as conn:
         rows = conn.execute("SELECT reason_code, entity_id, affected_count FROM escalations").fetchall()
     assert [tuple(r) for r in rows] == [("DATE_FORMAT_AMBIGUOUS", "f", 2)]
+
+
+def test_gate_scans_only_settled_date_mappings(tmp_path, monkeypatch):
+    from app.agent import orchestrator
+    from app.agent.mapper import MappingProposal
+
+    schema, policy = _env(tmp_path, monkeypatch)
+    path = tmp_path / FILE
+    path.write_text("emp_code,doj\nEMP000001,03/04/2024\nEMP000002,05/06/2023\n")
+    with connect() as conn:
+        conn.execute("INSERT INTO runs VALUES ('run', 1, '', 'uploaded', ?, ?)", (T, T))
+
+    # The id column scores weakly against hire_date; doj is mapped with confidence.
+    guesses = {"emp_code": ("hire_date", 0.47), "doj": ("hire_date", 0.95)}
+    monkeypatch.setattr(orchestrator, "propose_mapping", lambda profile, _schema: MappingProposal(
+        target_field=guesses[profile.name][0], confidence=guesses[profile.name][1], rationale="test",
+        alternatives=[], source="llm", model="test", latency_ms=0, cache_hit=False))
+    orchestrator.ingest_and_map("run", [path], schema, policy)
+
+    with connect() as conn:
+        dates = conn.execute("SELECT reason_code, affected_count FROM escalations "
+                             "WHERE reason_code LIKE 'DATE_FORMAT%'").fetchall()
+    # One question about doj's day/month order; nothing asked of the id column's "dates".
+    assert [tuple(r) for r in dates] == [("DATE_FORMAT_AMBIGUOUS", 2)]
