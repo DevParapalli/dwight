@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     # batches run in automation mode.
     dwight_mode: Literal["agent", "automation"] = "agent"
 
+    # When set, Anthropic serves every model call and nothing falls back to Groq
+    # or the local model, so a run's answers come from one model.
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-5-5"
+    # Thinking cannot be disabled on Sonnet 5.5; low effort is the cheapest
+    # setting. Thinking counts against max_tokens, hence a ceiling above
+    # llm_max_output_tokens, which is sized for Groq's tier.
+    anthropic_effort: Literal["low", "medium", "high"] = "low"
+    anthropic_max_output_tokens: int = 4096
+
     groq_env_key: str | None = None
     groq_model: str = "qwen/qwen3.8-27b"
     # Tried in order after groq_model, before the local model. A hosted tier runs

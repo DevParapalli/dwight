@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 
+import anthropic
 from groq import APIConnectionError, Groq, RateLimitError
 
 from app.db import connect, new_id
@@ -119,6 +120,8 @@ def active_model() -> str:
     and audit `model` field, so a local-model result never gets mislabeled or
     cache-collided under the Groq model's name. It follows the same fallback the
     calls do, so a result cached after a fallback is keyed to what produced it."""
+    if settings.anthropic_api_key:
+        return settings.anthropic_model
     chain = groq_chain()
     if chain:
         return chain[0]
@@ -162,6 +165,40 @@ def _complete_json_groq(system_prompt: str, user_prompt: str, max_tokens: int,
             time.sleep(delay)
     latency_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
     return json.loads(response.choices[0].message.content), latency_ms
+
+
+def _complete_json_anthropic(system_prompt: str, user_prompt: str, max_tokens: int) -> tuple[dict, int]:
+    """The SDK retries 429, 5xx and connection errors itself (max_retries)."""
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=60.0, max_retries=3)
+    started = datetime.now(UTC)
+    response = client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=max(max_tokens, settings.anthropic_max_output_tokens),
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+        thinking={"type": "adaptive"},
+        output_config={"effort": settings.anthropic_effort},
+    )
+    latency_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
+    if response.stop_reason in ("refusal", "max_tokens"):
+        raise RuntimeError(f"{settings.anthropic_model} stopped with {response.stop_reason!r} "
+                           f"after {response.usage.output_tokens} output tokens")
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    return _trailing_json_object(text), latency_ms
+
+
+def _trailing_json_object(text: str) -> dict:
+    """The JSON object that ends the reply. At low effort the model sometimes
+    reasons in prose before the answer, or fences it, despite the prompt."""
+    decoder = json.JSONDecoder()
+    for start in (i for i, ch in enumerate(text) if ch == "{"):
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue  # a brace inside the prose; the answer starts later
+        if isinstance(obj, dict) and not text[end:].strip().strip("`").strip():
+            return obj
+    raise ValueError(f"{settings.anthropic_model} replied without a trailing JSON object: {text[:200]!r}")
 
 
 def _complete_json_local(system_prompt: str, user_prompt: str, max_tokens: int) -> tuple[dict, int]:
@@ -228,6 +265,8 @@ def complete_json(system_prompt: str, user_prompt: str, max_tokens: int | None =
         # case the rules do not cover becomes a question rather than a guess.
         raise LLMNotConfigured("automation mode: model calls disabled")
     budget = max_tokens or settings.llm_max_output_tokens
+    if settings.anthropic_api_key:
+        return _complete_json_anthropic(system_prompt, user_prompt, budget)
     chain = groq_chain()
 
     for position, model in enumerate(chain):
@@ -261,7 +300,7 @@ def complete_json(system_prompt: str, user_prompt: str, max_tokens: int | None =
 
     if settings.local_fallback_model:
         return _complete_json_local(system_prompt, user_prompt, budget)
-    raise LLMNotConfigured("no GROQ_ENV_KEY and no LOCAL_FALLBACK_MODEL configured")
+    raise LLMNotConfigured("no ANTHROPIC_API_KEY, GROQ_ENV_KEY or LOCAL_FALLBACK_MODEL configured")
 
 
 def complete_json_reported(system_prompt: str, user_prompt: str, max_tokens: int | None = None,
